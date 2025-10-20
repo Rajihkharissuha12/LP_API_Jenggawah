@@ -1,0 +1,364 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ===== Enums =====
+enum Role {
+  ADMIN
+  STAFF
+}
+
+enum IdentityType {
+  KTP
+  SIM
+  PEL
+  OTHER
+}
+
+enum PricingType {
+  PER_TICKET
+  PER_HOUR
+  PER_DAY
+}
+
+enum BookingStatus {
+  NEW          // baru masuk dari landing page
+  APPROVED     // telah diverifikasi admin (kontak WA)
+  CONFIRMED    // slot dikunci, siap datang
+  CANCELLED    // dibatalkan admin/pelanggan
+  COMPLETED    // sudah terlaksana
+}
+
+enum PaymentStatus {
+  PENDING
+  DP
+  PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  TRANSFER_MANUAL
+  QRIS_OFFLINE
+}
+
+enum TransactionType {
+  DP
+  PAID
+  REFUND
+  ADJUSTMENT
+}
+
+enum VerificationMethod {
+  NONE
+  WHATSAPP
+  PHONE
+  OTHER
+}
+
+enum AvailabilityType {
+  OPEN     // slot dibuka spesifik (opsional jika pakai rule)
+  BLOCK    // blokir/blackout (maintenance/event)
+}
+
+enum FacilityCategory {
+  OUTDOOR
+  INDOOR
+  WATER
+  SPORT
+  EVENT
+  OTHER
+}
+
+// ===== Core Actors =====
+model Admin {
+  id        String        @id @default(uuid())
+  username  String        @unique
+  password  String
+  role      Role
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  isDeleted Boolean       @default(false)
+
+  logs      AuditLog[]
+  cashSessions CashSession[]
+  contactLogs  ContactLog[]
+}
+
+model Customer {
+  id             String    @id @default(uuid())
+  fullName       String
+  nik String @unique
+  phone          String
+  email          String?
+  address        String?
+  identityType   IdentityType?
+  identityNumber String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  isDeleted      Boolean   @default(false)
+
+  bookings       Booking[]
+  contacts       ContactLog[]
+}
+
+// ===== Facilities & Calendar =====
+model Facility {
+  id              String       @id @default(uuid())
+  name            String
+  description     String?
+  pricingType     PricingType
+  minDuration     Int?
+  basePrice       Decimal      @db.Decimal(12, 2)
+  // Tambahan untuk FE cards
+  heroImage       Json?                         // URL utama untuk hero [attached_file:1]
+  images          Json?    // daftar URL gambar (gallery) [attached_file:1]
+  category        FacilityCategory?               // kategori untuk filter FE [attached_file:1]
+  rating          Decimal?        @db.Decimal(3,2) // misal 4.8 [attached_file:1]
+  ratingCount     Int?                            // jumlah ulasan [attached_file:1]
+  features        String[]        @default([])    // fitur-fitur ringkas [attached_file:1]
+  capacityLabel   String?                         // contoh: "2-6 orang" [attached_file:1]
+  durationLabel   String?                         // contoh: "Per malam" (opsional) [attached_file:1]
+  iconKey         String?                         // contoh: "tent" untuk di-map di FE [attached_file:1]
+  rules           String?     @db.Text
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  isDeleted       Boolean      @default(false)
+  bookings        Booking[]
+  availability    AvailabilityType
+  closures        FacilityClosure[]
+  priceLists      PriceList[]
+  priceAdjustments PriceAdjustment[]
+  bookingRules    BookingRule?
+}
+
+
+
+model FacilityClosure {
+  id         String   @id @default(uuid())
+  facilityId String
+  startAt    DateTime
+  endAt      DateTime
+  reason     String?
+
+  facility   Facility @relation(fields: [facilityId], references: [id])
+
+  @@index([facilityId, startAt, endAt])
+}
+
+model BookingRule {
+  id                  String   @id @default(uuid())
+  facilityId          String   @unique
+  bookingWindowDays   Int?     // maksimun hari ke depan bisa pesan
+  advanceNoticeHours  Int?     // minimal H-x jam sebelum mulai
+  prepBufferBeforeMin Int?     // buffer persiapan sebelum
+  prepBufferAfterMin  Int?     // buffer sesudah
+  maxParticipants     Int?
+
+  facility   Facility  @relation(fields: [facilityId], references: [id])
+}
+
+// ===== Booking & Items =====
+model Booking {
+  id              String         @id @default(uuid())
+  bookingCode     String         @unique
+  customerId      String
+  facilityId      String
+
+  // tanggal/waktu utama (opsional jika pakai BookingItem multi-sesi)
+  bookingDate     DateTime
+  startTime       DateTime?
+  endTime         DateTime?
+
+  participants    Int
+  purpose         String?
+
+  status          BookingStatus
+  adminNote       String?
+
+  // verifikasi via WA/Phone
+  verificationMethod VerificationMethod @default(NONE)
+  verifiedAt      DateTime?
+  source          String? // WEB/ADMIN
+
+  // pricing snapshot
+  totalAmount     Decimal        @db.Decimal(12, 2)
+  currency        String         @default("IDR")
+
+  version         Int            @default(1) // optimistic locking
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  isDeleted       Boolean        @default(false)
+
+  customer Customer @relation(fields: [customerId], references: [id])
+  facility Facility @relation(fields: [facilityId], references: [id])
+
+  items     BookingItem[]
+  payments  Payment?
+  contacts  ContactLog[]
+  auditLogs AuditLog[]
+   transactions PaymentTransaction[]
+
+  @@index([facilityId, bookingDate])
+  @@index([status])
+}
+
+model BookingItem {
+  id         String   @id @default(uuid())
+  bookingId  String
+  date       DateTime @db.Date
+  startTime  DateTime?
+  endTime    DateTime?
+  unitType   PricingType // PER_HOUR/PER_DAY, sinkron dengan pricing
+  unitCount  Int?
+  price      Decimal  @db.Decimal(12, 2)
+  meta       Json?     // snapshot nama fasilitas, tarif, dsb.
+
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId, date])
+}
+
+// ===== Payments (offline) =====
+model Payment {
+  id              String          @id @default(uuid())
+  bookingId       String          @unique
+  status          PaymentStatus
+  totalDue        Decimal         @db.Decimal(12, 2)
+  totalPaid       Decimal         @db.Decimal(12, 2) @default(0)
+  lastTransactionAt DateTime?
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  isDeleted       Boolean         @default(false)
+
+  booking         Booking         @relation(fields: [bookingId], references: [id])
+  transactions    PaymentTransaction[]
+}
+
+model PaymentTransaction {
+  id            String           @id @default(uuid())
+  bookingId     String
+  amount        Decimal          @db.Decimal(12, 2)
+  type          TransactionType
+  method        PaymentMethod
+  status        String           @default("RECORDED") // atau enum kecil jika perlu
+  receiptNumber String?
+  cashierId     String?
+  paidAt        DateTime?
+  locationId    String?
+  proofUrl      String?
+  notes         String?
+  createdAt     DateTime         @default(now())
+  isVoided      Boolean          @default(false)
+  voidReason    String?
+  voidedBy      String?
+  voidedAt      DateTime?
+  paymentId     String
+  payment       Payment         @relation(fields: [paymentId], references: [id])
+  booking       Booking          @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId, createdAt])
+}
+
+// Opsional: sesi kasir/loket per admin untuk rekap harian
+model CashSession {
+  id         String   @id @default(uuid())
+  adminId    String
+  locationId String?
+  openedAt   DateTime @default(now())
+  closedAt   DateTime?
+
+  admin      Admin    @relation(fields: [adminId], references: [id])
+}
+
+// ===== Pricing =====
+model PriceList {
+  id          String     @id @default(uuid())
+  facilityId  String
+  pricingType PricingType
+  unitPrice   Decimal    @db.Decimal(12, 2)
+  minDuration Int?
+  maxDuration Int?
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  facility    Facility   @relation(fields: [facilityId], references: [id])
+
+  @@index([facilityId, effectiveFrom])
+}
+
+model PriceAdjustment {
+  id          String   @id @default(uuid())
+  facilityId  String
+  kind        String   // PEAK/OFF_PEAK/DISCOUNT/PROMO
+  rule        Json     // mis. hari, jam, tanggal khusus
+  valueType   String   // PERCENT/FIXED
+  amount      Decimal  @db.Decimal(12, 2)
+
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  facility    Facility @relation(fields: [facilityId], references: [id])
+}
+
+// ===== Contacts (WhatsApp log ringkas) =====
+model ContactLog {
+  id             String   @id @default(uuid())
+  // jika log ini terkait booking tertentu, boleh tetap ada:
+  bookingId      String?
+  booking        Booking? @relation(fields: [bookingId], references: [id])
+
+  // WAJIB untuk opposite relation ke Customer:
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id])
+
+  adminId        String?
+  admin          Admin?   @relation(fields: [adminId], references: [id])
+
+  channel        String   @default("WHATSAPP")
+  direction      String   @default("OUT")
+  messageSummary String
+  createdAt      DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([bookingId, createdAt])
+}
+
+// ===== Audit log immutable =====
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorType  String   // ADMIN/SYSTEM/CUSTOMER
+  actorId    String?
+  action     String   // BOOKING_CREATE/STATUS_CHANGE/PAYMENT_ADD/...
+  entity     String   // booking/payment/transaction/...
+  entityId   String
+  before     Json?
+  after      Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  // Relasi opsional ke booking agar mudah difilter
+  bookingId  String?
+  booking    Booking? @relation(fields: [bookingId], references: [id])
+
+  adminId    String?
+  admin      Admin?   @relation(fields: [adminId], references: [id])
+
+  @@index([entity, entityId, createdAt])
+  @@index([bookingId, createdAt])
+  @@index([adminId, createdAt])
+}

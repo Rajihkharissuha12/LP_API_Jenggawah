@@ -53,7 +53,32 @@ app.use("/activities", activitiesRoutes);
 
 // Route test
 app.get("/", (req, res) => {
-  res.json({ message: "Hello Express + Prisma!" });
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Welcome Event</title>
+        <style>
+          body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f5f5f5;
+            font-family: Arial, sans-serif;
+          }
+          h1 {
+            font-size: 3rem;
+            color: #333;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>Welcome Jenggawah</h1>
+      </body>
+    </html>
+  `);
 });
 
 const PORT = process.env.PORT || 4000;

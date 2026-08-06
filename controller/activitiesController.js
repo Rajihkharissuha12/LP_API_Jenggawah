@@ -60,7 +60,11 @@ const getActivityLogs = async (req, res) => {
             select: {
               id: true,
               username: true,
-              role: true,
+              adminRoles: {
+                select: {
+                  role: true,
+                },
+              },
             },
           },
           booking: {
@@ -242,7 +246,11 @@ const getActivitySummary = async (req, res) => {
       select: {
         id: true,
         username: true,
-        role: true,
+        adminRoles: {
+          select: {
+            role: true,
+          },
+        },
       },
     });
 
@@ -260,8 +268,8 @@ const getActivitySummary = async (req, res) => {
       yesterdayCount > 0
         ? Math.round(((todayCount - yesterdayCount) / yesterdayCount) * 100)
         : todayCount > 0
-        ? 100
-        : 0;
+          ? 100
+          : 0;
 
     return res.status(200).json({
       success: true,

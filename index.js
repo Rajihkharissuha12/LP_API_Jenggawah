@@ -5,14 +5,26 @@ const adminRoutes = require("./routes/adminRoutes");
 const facilityRoutes = require("./routes/facilityRoutes");
 const bookingRoutes = require("./routes/bookingRoutes");
 const activitiesRoutes = require("./routes/activitiesRoutes");
+const roleRoutes = require("./routes/roleRoutes");
+const bahanRoutes = require("./routes/bahanRoutes");
+const supplierRoutes = require("./routes/supplierRoutes");
+const pembelianbahanRoutes = require("./routes/pembelianbahanRoutes");
+const mutasiRoutes = require("./routes/mutasiRoutes");
+const stokopnameRoutes = require("./routes/opnameRoutes");
+const menuRoutes = require("./routes/menuRoutes");
+const penjualanRoutes = require("./routes/penjualanRoutes");
+const dashboardRoutes = require("./routes/dashboardRoutes");
 
 const app = express();
 
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
+  "http://localhost:8081",
+  "http://127.0.0.1:8081",
   "http://localhost:4000",
   "http://127.0.0.1:4000",
+  process.env.BACKEND_URL,
   process.env.FRONTEND_URL,
   process.env.FRONTEND_URL_1,
 ].filter(Boolean);
@@ -28,8 +40,8 @@ app.use(
           origin === allowedOrigin ||
           (allowedOrigin.includes("*") &&
             new RegExp("^" + allowedOrigin.replace(/\*/g, ".*") + "$").test(
-              origin
-            ))
+              origin,
+            )),
       );
 
       if (isAllowed) {
@@ -41,7 +53,7 @@ app.use(
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true, // If needed to send cookies/credentials
-  })
+  }),
 );
 
 app.use(express.json());
@@ -50,6 +62,15 @@ app.use("/admin", adminRoutes);
 app.use("/facilities", facilityRoutes);
 app.use("/booking", bookingRoutes);
 app.use("/activities", activitiesRoutes);
+app.use("/role", roleRoutes);
+app.use("/bahan", bahanRoutes);
+app.use("/supplier", supplierRoutes);
+app.use("/pembelian-bahan", pembelianbahanRoutes);
+app.use("/mutasi", mutasiRoutes);
+app.use("/stockopname", stokopnameRoutes);
+app.use("/penjualan", penjualanRoutes);
+app.use("/menu", menuRoutes);
+app.use("/dashboard", dashboardRoutes);
 
 // Route test
 app.get("/", (req, res) => {

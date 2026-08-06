@@ -10,28 +10,37 @@
     "vercel-build": "prisma generate",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "prisma": {
+    "seed": "tsx prisma/seed-dashboard.ts"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@prisma/client": "^6.16.1",
+    "@prisma/client": "^6.19.3",
     "bcrypt": "^6.0.0",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
     "dayjs": "^1.11.18",
-    "dotenv": "^17.2.2",
+    "dotenv": "^17.4.2",
+    "expo": "^56.0.12",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
-    "nodemailer": "^7.0.9"
+    "nodemailer": "^7.0.9",
+    "pg": "^8.21.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
     "@types/node": "^24.3.1",
+    "@types/pg": "^8.20.0",
     "nodemon": "^3.1.10",
-    "prisma": "^6.16.1",
+    "prisma": "^6.19.3",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.1",
     "typescript": "^5.9.2"
   }
 }

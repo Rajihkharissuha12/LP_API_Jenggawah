@@ -14,12 +14,6 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// ===== Enums =====
-enum Role {
-  ADMIN
-  STAFF
-}
-
 enum IdentityType {
   KTP
   SIM
@@ -54,6 +48,12 @@ enum PaymentMethod {
   QRIS_OFFLINE
 }
 
+enum SalesPaymentMethod {
+  CASH
+  TRANSFER
+  QRIS
+}
+
 enum TransactionType {
   DP
   PAID
@@ -82,19 +82,93 @@ enum FacilityCategory {
   OTHER
 }
 
+enum BahanType {
+  PCS
+  GRAM
+  KG
+  ML
+  LITER
+  PACK
+  BOTOL
+}
+
+enum BahanTypePembelian {
+  DUS
+  PACK
+  KARUNG
+  BOTOL
+}
+
+enum StockOpnameStatus {
+  DRAFT
+  COMPLETED
+  CANCELLED
+}
+
+enum SalesStatus {
+  PENDING_PAYMENT   // menunggu pembayaran
+  PAID              // sudah bayar
+  PREPARING         // sedang dibuat
+  READY             // siap diambil
+  COMPLETED         // transaksi selesai
+  CANCELLED
+  REFUNDED
+}
+
+enum OrderType {
+  DINE_IN
+  TAKE_AWAY
+  DELIVERY
+}
+
+enum PaymentStatuss {
+  UNPAID
+  PARTIAL
+  PAID
+}
+
+enum JenisMutasi {
+  MASUK
+  KELUAR
+  ADJUSTMENT
+}
+
 // ===== Core Actors =====
 model Admin {
   id        String        @id @default(uuid())
   username  String        @unique
   password  String
-  role      Role
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
   isDeleted Boolean       @default(false)
 
   logs      AuditLog[]
+  stockOpname  StockOpname[]
   cashSessions CashSession[]
   contactLogs  ContactLog[]
+  adminRoles   AdminRole[]
+  penjualans Penjualan[]
+}
+
+model Role{
+  id String @id @default(uuid())
+  role String
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  isDeleted Boolean       @default(false)
+
+  adminRoles   AdminRole[]
+}
+
+model AdminRole {
+  adminId      String
+  roleId       String
+  assignedAt   DateTime @default(now())
+
+  admin        Admin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  role         Role  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([adminId, roleId])
 }
 
 model Customer {
@@ -143,8 +217,6 @@ model Facility {
   priceAdjustments PriceAdjustment[]
   bookingRules    BookingRule?
 }
-
-
 
 model FacilityClosure {
   id         String   @id @default(uuid())
@@ -239,6 +311,7 @@ model Payment {
   totalDue        Decimal         @db.Decimal(12, 2)
   totalPaid       Decimal         @db.Decimal(12, 2) @default(0)
   lastTransactionAt DateTime?
+  notes String?
 
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
@@ -281,6 +354,8 @@ model CashSession {
   openedAt   DateTime @default(now())
   closedAt   DateTime?
 
+  penjualans Penjualan[]
+
   admin      Admin    @relation(fields: [adminId], references: [id])
 }
 
@@ -313,6 +388,96 @@ model PriceAdjustment {
 
   facility    Facility @relation(fields: [facilityId], references: [id])
 }
+
+model Bahan {
+  id             String                @id @default(uuid())
+  nama           String
+  kategori       String
+  satuan         BahanType
+  minimum_stok   Int
+  stok           Int                   @default(0)
+  hargaPerSatuan Decimal @default(0)
+
+  pembelian      PembelianBahan[]
+  mutasi         StokMutasi[]
+  stockOpnameDetails StockOpnameDetail[]
+  menuRecipes    MenuRecipe[]
+  penjualanRecipes PenjualanDetailRecipe[]
+
+
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  isDeleted      Boolean               @default(false)
+}
+
+model PembelianBahan {
+  id                String                @id @default(uuid())
+
+  // Relasi
+  bahanId           String
+  bahan             Bahan                 @relation(fields: [bahanId], references: [id], onDelete: Restrict)
+
+  supplierId        String
+  supplier          Supplier              @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  // Data Pembelian
+  tanggal           DateTime
+  qtyBeli           Int
+  satuanBeli        BahanTypePembelian
+  isiPerSatuan      Int
+
+  hargaSatuan       Decimal               @db.Decimal(12,2)
+  hargaTotal        Decimal               @db.Decimal(12,2)
+  hargaPerUnit      Decimal               @db.Decimal(12,2) @default(0)
+
+  // Upload Struk
+  imgStrukUrl       String?
+  imgStrukPath      String?
+
+  // Upload Barang
+  imgBarangUrl      String?
+  imgBarangPath     String?
+
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  isDeleted         Boolean               @default(false)
+}
+
+model Supplier {
+  id          String             @id @default(uuid())
+  nama        String
+  pic         String?
+  no_hp       String?
+  email       String?
+  alamat      String?
+  keterangan  String?
+
+  pembelian   PembelianBahan[]
+
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  isDeleted Boolean @default(false)
+}
+
+model StokMutasi {
+  id              String                @id @default(uuid())
+
+  bahanId         String
+  bahan           Bahan                 @relation(fields: [bahanId], references: [id], onDelete: Restrict)
+
+  jenis           JenisMutasi
+  qty             Int
+  stokSetelah     Int
+  keterangan      String?
+  penjualanId String?
+  penjualan Penjualan? @relation(fields: [penjualanId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  isDeleted       Boolean               @default(false)
+}
+
+
 
 // ===== Contacts (WhatsApp log ringkas) =====
 model ContactLog {
@@ -361,4 +526,255 @@ model AuditLog {
   @@index([entity, entityId, createdAt])
   @@index([bookingId, createdAt])
   @@index([adminId, createdAt])
+}
+
+model StockOpname {
+  id             String               @id @default(uuid())
+  nomor          String               @unique
+  tanggal        DateTime
+  status         StockOpnameStatus    @default(DRAFT)
+  totalBarang    Int                  @default(0)
+  totalSelisih   Int                  @default(0)
+  keterangan     String?
+  createdBy      String
+  admin          Admin                @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+  details        StockOpnameDetail[]
+
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  isDeleted      Boolean              @default(false)
+
+  @@index([tanggal])
+  @@index([status])
+}
+
+model StockOpnameDetail {
+  id              String          @id @default(uuid())
+
+  stockOpnameId   String
+  stockOpname     StockOpname     @relation(fields: [stockOpnameId], references: [id], onDelete: Cascade)
+
+  bahanId         String
+  bahan           Bahan           @relation(fields: [bahanId], references: [id], onDelete: Restrict)
+
+  stokSistem      Int
+  stokFisik       Int
+
+  selisih         Int
+
+  catatan         String?
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([stockOpnameId])
+  @@index([bahanId])
+}
+
+model MenuCategory{
+
+ id String @id @default(uuid())
+
+ nama String
+ deskripsi String?
+ isActive Boolean @default(true)
+
+ createdAt DateTime @default(now())
+
+ updatedAt DateTime @updatedAt
+
+ isDeleted Boolean @default(false)
+
+ menus      Menu[]
+
+}
+
+model Menu {
+  id          String   @id @default(uuid())
+
+  categoryId  String
+  category    MenuCategory @relation(fields: [categoryId], references: [id])
+
+  nama        String
+  deskripsi   String?
+  foto        String?
+
+  hargaJual   Int  
+  hpp         Int @default(0)
+
+  marginNominal Int @default(0) 
+
+  marginPersen Int @default(0)
+
+  isActive    Boolean  @default(true)
+
+  recipes     MenuRecipe[]
+  penjualanDetails PenjualanDetail[]
+
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  isDeleted   Boolean  @default(false)
+}
+
+model MenuRecipe{
+
+ id String @id @default(uuid())
+
+ qty Decimal
+
+  menuId   String
+  menu     Menu @relation(fields: [menuId], references: [id])
+
+  bahanId  String
+  bahan    Bahan @relation(fields: [bahanId], references: [id])
+
+}
+
+model Penjualan {
+
+  id String @id @default(uuid())
+
+  nomorInvoice String @unique
+
+  queueNumber String?
+
+  adminId String
+  admin Admin @relation(fields: [adminId], references: [id])
+
+  cashSessionId String?
+
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id])
+
+  customerName String?
+
+  orderType OrderType
+
+  tableNumber String?
+
+  subtotal Int
+
+  discountAmount Int? @default(0)
+
+  discountPercent Int? @default(0)
+
+  isTaxEnabled Boolean @default(false)
+
+  taxPercent Int @default(0)
+
+  taxRate Int @default(0)
+
+  taxAmount Int @default(0)
+
+  grandTotal Int
+
+  status SalesStatus @default(PENDING_PAYMENT)
+
+  notes String?
+
+  paidAt DateTime?
+
+  totalItem Int
+
+  paymentStatus PaymentStatuss @default(UNPAID)
+
+  printedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  updatedAt DateTime @updatedAt
+
+  details PenjualanDetail[]
+
+  payments PenjualanPayment[]
+
+  stockMutations StokMutasi[]
+
+  @@index([createdAt])
+
+  @@index([status])
+
+  @@index([paymentStatus])
+
+  @@index([adminId])
+
+  @@index([cashSessionId])
+}
+
+model PenjualanPayment {
+
+  id           String @id @default(uuid())
+
+  penjualanId  String
+  penjualan    Penjualan @relation(fields: [penjualanId], references: [id], onDelete: Cascade)
+
+  method       SalesPaymentMethod
+
+  amount       Int
+  paidAmount   Int
+  changeAmount Int
+
+  proofImagePath String?
+  proofImageUrl  String?
+
+  referenceNo String?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([penjualanId])
+}
+
+model PenjualanDetail {
+
+  id              String      @id @default(uuid())
+
+  penjualanId     String
+  penjualan       Penjualan   @relation(fields: [penjualanId], references: [id], onDelete: Cascade)
+
+  menuId          String
+  menu            Menu        @relation(fields: [menuId], references: [id])
+
+  namaMenu        String
+
+  catatan         String?
+
+  hargaJual       Int
+
+  hpp             Int
+
+  qty             Int
+
+  subtotal        Int
+
+  fotoMenu String?
+
+  categoryName String?
+
+  createdAt       DateTime    @default(now())
+
+  recipes         PenjualanDetailRecipe[]
+
+  @@index([penjualanId])
+}
+
+model PenjualanDetailRecipe {
+
+  id                  String              @id @default(uuid())
+
+  penjualanDetailId   String
+  penjualanDetail     PenjualanDetail    @relation(fields: [penjualanDetailId], references: [id], onDelete: Cascade)
+
+  bahanId             String
+  bahan               Bahan              @relation(fields: [bahanId], references: [id])
+
+  namaBahan           String
+
+  qty                 Decimal            @db.Decimal(10,2)
+
+  hargaPerUnit        Decimal            @db.Decimal(12,2)
+
+  totalHpp            Decimal            @db.Decimal(12,2)
 }

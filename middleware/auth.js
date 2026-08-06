@@ -29,8 +29,19 @@ async function authenticate(req, res, next) {
 
     // payload diharapkan: { sub: adminId, role: 'ADMIN'|'STAFF', username, iat, exp }
     const admin = await prisma.admin.findUnique({
-      where: { id: payload.sub },
-      select: { id: true, username: true, role: true, isDeleted: true },
+      where: {
+        id: payload.sub,
+      },
+      select: {
+        id: true,
+        username: true,
+        isDeleted: true,
+        adminRoles: {
+          select: {
+            role: true,
+          },
+        },
+      },
     });
     if (!admin || admin.isDeleted) {
       return res
@@ -38,11 +49,12 @@ async function authenticate(req, res, next) {
         .json({ message: "Akun tidak ditemukan atau nonaktif" });
     } // verifikasi sisi server setelah token valid [2]
 
-    // Lampirkan ke request context
+    const roles = admin.adminRoles.map((r) => r.role);
+
     req.user = {
       id: admin.id,
       username: admin.username,
-      role: admin.role,
+      roles,
     };
 
     return next();
@@ -57,19 +69,34 @@ async function authenticate(req, res, next) {
  * - authorizeRoles('ADMIN') untuk admin saja
  * - authorizeRoles('ADMIN','STAFF') untuk keduanya
  */
-function authorizeRoles(...allowed) {
+function authorizeRoles(...allowedRoles) {
   return (req, res, next) => {
     try {
       if (!req.user) {
-        return res.status(401).json({ message: "Unauthorized" });
-      } // autentikasi harus jalan dulu [1]
-      if (!allowed.includes(req.user.role)) {
-        return res.status(403).json({ message: "Forbidden" });
-      } // pembatasan akses berbasis peran [3]
-      return next();
+        return res.status(401).json({
+          message: "Unauthorized",
+        });
+      }
+
+      const userRoles = req.user.roles || [];
+
+      const hasRole = userRoles.some((role) =>
+        allowedRoles.includes(role.role),
+      );
+
+      if (!hasRole) {
+        return res.status(403).json({
+          message: "Forbidden",
+        });
+      }
+
+      next();
     } catch (err) {
       console.error("authorizeRoles error:", err);
-      return res.status(500).json({ message: "Terjadi kesalahan server" });
+
+      return res.status(500).json({
+        message: "Terjadi kesalahan server",
+      });
     }
   };
 }

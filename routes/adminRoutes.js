@@ -23,7 +23,7 @@ router.delete(
   "/delete/:id",
   authenticate,
   authorizeRoles("ADMIN"),
-  deleteAdmin
+  deleteAdmin,
 );
 
 module.exports = router;

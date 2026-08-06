@@ -7,14 +7,37 @@ const prisma = new PrismaClient();
 // Admin membuat admin baru
 const createAdmin = async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const { username, password, roleIds } = req.body;
+    console.log(req.body);
     const adminId = req.user?.id;
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     if (!adminId) {
       return res.status(401).json({ success: false, error: "Unauthorized" });
     }
 
-    if (!username || !password || !role) {
+    const findRoles = await prisma.role.findMany({
+      where: {
+        id: {
+          in: roleIds,
+        },
+      },
+    });
+
+    if (findRoles.length !== roleIds.length) {
+      console.log("One or more roles are invalid");
+      return res.status(400).json({
+        success: false,
+        error: "One or more roles are invalid",
+      });
+    }
+
+    if (
+      !username ||
+      !password ||
+      !Array.isArray(roleIds) ||
+      roleIds.length === 0
+    ) {
       await prisma.auditLog.create({
         data: {
           actorType: "ADMIN",
@@ -30,31 +53,11 @@ const createAdmin = async (req, res) => {
           userAgent: req.headers["user-agent"],
         },
       });
-      return res.status(400).json({
-        success: false,
-        error: "Username, password, and role are required",
-      });
-    }
 
-    if (!["ADMIN", "STAFF"].includes(role)) {
-      await prisma.auditLog.create({
-        data: {
-          actorType: "ADMIN",
-          actorId: adminId,
-          adminId,
-          action: "ADMIN_CREATE",
-          entity: "admin",
-          entityId: username,
-          bookingId: null,
-          before: null,
-          after: { invalidRole: role },
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        },
-      });
+      console.log("Username, password, and at least one role are required");
       return res.status(400).json({
         success: false,
-        error: "Role must be ADMIN or STAFF",
+        error: "Username, password, and at least one role are required",
       });
     }
 
@@ -79,17 +82,55 @@ const createAdmin = async (req, res) => {
           userAgent: req.headers["user-agent"],
         },
       });
+      console.log("Username already exists");
       return res
         .status(409)
         .json({ success: false, error: "Username already exists" });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-
     const newAdmin = await prisma.$transaction(async (db) => {
       const created = await db.admin.create({
-        data: { username, password: hashedPassword, role },
-        select: { id: true, username: true, role: true, createdAt: true },
+        data: { username, password: hashedPassword },
+        select: {
+          id: true,
+          username: true,
+          createdAt: true,
+          adminRoles: {
+            select: {
+              role: {
+                select: {
+                  role: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      await db.adminRole.createMany({
+        data: roleIds.map((roleId) => ({
+          adminId: created.id,
+          roleId,
+        })),
+      });
+      const adminWithRoles = await db.admin.findUnique({
+        where: {
+          id: created.id,
+        },
+        select: {
+          id: true,
+          username: true,
+          createdAt: true,
+          adminRoles: {
+            select: {
+              role: {
+                select: {
+                  id: true,
+                  role: true,
+                },
+              },
+            },
+          },
+        },
       });
 
       await db.auditLog.create({
@@ -105,7 +146,7 @@ const createAdmin = async (req, res) => {
           after: {
             id: created.id,
             username: created.username,
-            role: created.role,
+            roles: findRoles.map((r) => r.role),
             createdAt: created.createdAt,
             timestamp: new Date().toISOString(),
           },
@@ -114,12 +155,13 @@ const createAdmin = async (req, res) => {
         },
       });
 
-      return created;
+      return adminWithRoles;
     });
 
     console.info(
-      `[AUDIT] Admin ${adminId} membuat admin baru ${newAdmin.username} (${newAdmin.id})`
+      `[AUDIT] Admin ${adminId} membuat admin baru ${newAdmin.username} (${newAdmin.id})`,
     );
+    console.log(newAdmin);
     return res.status(201).json({
       success: true,
       data: newAdmin,
@@ -167,11 +209,16 @@ const loginAdmin = async (req, res) => {
         id: true,
         username: true,
         password: true,
-        role: true,
         isDeleted: true,
+        adminRoles: {
+          select: {
+            role: true,
+          },
+        },
       },
     });
-    if (!admin || admin.isDeleted) {
+
+    if (!admin || admin.isDeleted === true) {
       // Jangan bocorkan apakah username ada, tetap general
       return res.status(401).json({ message: "Kredensial tidak valid" });
     } // cek eksistensi akun [2]
@@ -182,12 +229,14 @@ const loginAdmin = async (req, res) => {
       return res.status(401).json({ message: "Kredensial tidak valid" });
     } // bcrypt compare sesuai praktik [1]
 
-    // Buat JWT
+    const roles = admin.adminRoles.map((r) => r.role);
+
     const payload = {
       sub: admin.id,
       username: admin.username,
-      role: admin.role,
+      roles,
     };
+
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
       expiresIn: process.env.JWT_EXPIRES_IN || "8h",
     }); // JWT untuk sesi autentikasi [2]
@@ -200,7 +249,10 @@ const loginAdmin = async (req, res) => {
         action: "ADMIN_LOGIN",
         entity: "admin",
         entityId: admin.id,
-        after: { username: admin.username, role: admin.role },
+        after: {
+          username: admin.username,
+          roles,
+        },
       },
     }); // catat aktivitas login [4]
 
@@ -211,7 +263,7 @@ const loginAdmin = async (req, res) => {
         user: {
           id: admin.id,
           username: admin.username,
-          role: admin.role,
+          roles,
         },
       },
     });
@@ -389,17 +441,17 @@ const getDashboardStats = async (req, res) => {
 
     const bookingPercentageChange = calculatePercentageChange(
       totalBookingToday,
-      totalBookingYesterday
+      totalBookingYesterday,
     );
 
     const activePercentageChange = calculatePercentageChange(
       activeBookings,
-      activeBookingsYesterday
+      activeBookingsYesterday,
     );
 
     const cancelledPercentageChange = calculatePercentageChange(
       cancelledBookings,
-      cancelledBookingsYesterday
+      cancelledBookingsYesterday,
     );
 
     // Ambil nama fasilitas terpopuler
@@ -479,7 +531,11 @@ const getAllAdmins = async (req, res) => {
       select: {
         id: true,
         username: true,
-        role: true,
+        adminRoles: {
+          select: {
+            role: true,
+          },
+        },
         createdAt: true,
         updatedAt: true,
         // Jangan return password
@@ -541,159 +597,171 @@ const getAdminById = async (req, res) => {
 const updateAdmin = async (req, res) => {
   try {
     const { id } = req.params;
-    const { username, password, role } = req.body;
+    const { username, password, roleIds } = req.body;
     const adminId = req.user?.id;
 
     if (!adminId) {
-      return res.status(401).json({ success: false, error: "Unauthorized" });
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized",
+      });
     }
 
     const existingAdmin = await prisma.admin.findUnique({
       where: { id },
-      select: {
-        id: true,
-        username: true,
-        role: true,
-        isDeleted: true,
-        updatedAt: true,
+      include: {
+        adminRoles: {
+          include: {
+            role: true,
+          },
+        },
       },
     });
 
     if (!existingAdmin || existingAdmin.isDeleted) {
-      await prisma.auditLog.create({
-        data: {
-          actorType: "ADMIN",
-          actorId: adminId,
-          adminId,
-          action: "ADMIN_UPDATE",
-          entity: "admin",
-          entityId: id || "N/A",
-          bookingId: null,
-          before: existingAdmin
-            ? {
-                id: existingAdmin.id,
-                username: existingAdmin.username,
-                role: existingAdmin.role,
-                isDeleted: existingAdmin.isDeleted,
-              }
-            : null,
-          after: null,
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        },
+      return res.status(404).json({
+        success: false,
+        error: "Admin not found",
       });
-      return res.status(404).json({ success: false, error: "Admin not found" });
     }
 
     const updateData = {};
     const changes = {};
 
-    if (username) {
-      const dup = await prisma.admin.findFirst({
-        where: { username, id: { not: id }, isDeleted: false },
-        select: { id: true, username: true },
-      });
-      if (dup) {
-        await prisma.auditLog.create({
-          data: {
-            actorType: "ADMIN",
-            actorId: adminId,
-            adminId,
-            action: "ADMIN_UPDATE",
-            entity: "admin",
-            entityId: id,
-            bookingId: null,
-            before: {
-              id: existingAdmin.id,
-              username: existingAdmin.username,
-              role: existingAdmin.role,
-            },
-            after: null,
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
+    // ==========================
+    // Username
+    // ==========================
+    if (
+      username &&
+      username.trim() !== "" &&
+      username !== existingAdmin.username
+    ) {
+      const duplicate = await prisma.admin.findFirst({
+        where: {
+          username,
+          id: {
+            not: id,
           },
-        });
-        return res
-          .status(409)
-          .json({ success: false, error: "Username already exists" });
-      }
-      updateData.username = username;
-      if (username !== existingAdmin.username)
-        changes.username = { from: existingAdmin.username, to: username };
-    }
-
-    if (password) {
-      updateData.password = await bcrypt.hash(password, 10);
-      changes.password = { changed: true };
-    }
-
-    if (role) {
-      if (!["ADMIN", "STAFF"].includes(role)) {
-        await prisma.auditLog.create({
-          data: {
-            actorType: "ADMIN",
-            actorId: adminId,
-            adminId,
-            action: "ADMIN_UPDATE",
-            entity: "admin",
-            entityId: id,
-            bookingId: null,
-            before: {
-              id: existingAdmin.id,
-              username: existingAdmin.username,
-              role: existingAdmin.role,
-            },
-            after: { invalidRole: role },
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-        return res
-          .status(400)
-          .json({ success: false, error: "Role must be ADMIN or STAFF" });
-      }
-      updateData.role = role;
-      if (role !== existingAdmin.role)
-        changes.role = { from: existingAdmin.role, to: role };
-    }
-
-    if (Object.keys(updateData).length === 0) {
-      await prisma.auditLog.create({
-        data: {
-          actorType: "ADMIN",
-          actorId: adminId,
-          adminId,
-          action: "ADMIN_UPDATE",
-          entity: "admin",
-          entityId: id,
-          bookingId: null,
-          before: {
-            id: existingAdmin.id,
-            username: existingAdmin.username,
-            role: existingAdmin.role,
-          },
-          after: { note: "No changes applied" },
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
+          isDeleted: false,
         },
       });
+
+      if (duplicate) {
+        return res.status(409).json({
+          success: false,
+          error: "Username already exists",
+        });
+      }
+
+      updateData.username = username;
+
+      changes.username = {
+        from: existingAdmin.username,
+        to: username,
+      };
+    }
+
+    // ==========================
+    // Password
+    // ==========================
+    if (password && password.trim() !== "") {
+      updateData.password = await bcrypt.hash(password, 10);
+
+      changes.password = {
+        changed: true,
+      };
+    }
+
+    // ==========================
+    // Roles
+    // ==========================
+    let validRoles = [];
+
+    if (roleIds) {
+      if (!Array.isArray(roleIds) || roleIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "roleIds must be an array",
+        });
+      }
+
+      validRoles = await prisma.role.findMany({
+        where: {
+          id: {
+            in: roleIds,
+          },
+          isDeleted: false,
+        },
+      });
+
+      if (validRoles.length !== roleIds.length) {
+        return res.status(400).json({
+          success: false,
+          error: "One or more roles are invalid",
+        });
+      }
+
+      changes.roles = {
+        from: existingAdmin.adminRoles.map((r) => r.role.role),
+        to: validRoles.map((r) => r.role),
+      };
+    }
+
+    const noUsername = !updateData.username;
+    const noPassword = !updateData.password;
+    const noRole =
+      !roleIds ||
+      JSON.stringify([...roleIds].sort()) ===
+        JSON.stringify(existingAdmin.adminRoles.map((r) => r.roleId).sort());
+
+    if (noUsername && noPassword && noRole) {
       return res.status(200).json({
         success: true,
-        data: {
-          id: existingAdmin.id,
-          username: existingAdmin.username,
-          role: existingAdmin.role,
-          updatedAt: existingAdmin.updatedAt,
-        },
+        data: existingAdmin,
         message: "No changes applied",
       });
     }
 
     const updatedAdmin = await prisma.$transaction(async (db) => {
-      const updated = await db.admin.update({
-        where: { id },
-        data: updateData,
-        select: { id: true, username: true, role: true, updatedAt: true },
+      if (Object.keys(updateData).length > 0) {
+        await db.admin.update({
+          where: {
+            id,
+          },
+          data: updateData,
+        });
+      }
+
+      if (roleIds) {
+        await db.adminRole.deleteMany({
+          where: {
+            adminId: id,
+          },
+        });
+
+        await db.adminRole.createMany({
+          data: roleIds.map((roleId) => ({
+            adminId: id,
+            roleId,
+          })),
+        });
+      }
+
+      const result = await db.admin.findUnique({
+        where: {
+          id,
+        },
+        select: {
+          id: true,
+          username: true,
+          createdAt: true,
+          updatedAt: true,
+          adminRoles: {
+            include: {
+              role: true,
+            },
+          },
+        },
       });
 
       await db.auditLog.create({
@@ -706,29 +774,27 @@ const updateAdmin = async (req, res) => {
           entityId: id,
           bookingId: null,
           before: {
-            id: existingAdmin.id,
             username: existingAdmin.username,
-            role: existingAdmin.role,
+            roles: existingAdmin.adminRoles.map((r) => r.role.role),
           },
           after: {
-            id: updated.id,
-            username: updated.username,
-            role: updated.role,
-            updatedAt: updated.updatedAt,
+            username: result.username,
+            roles: result.adminRoles.map((r) => r.role.role),
             changes,
-            timestamp: new Date().toISOString(),
+            updatedAt: result.updatedAt,
           },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         },
       });
 
-      return updated;
+      return result;
     });
 
     console.info(
-      `[AUDIT] Admin ${adminId} mengubah admin ${existingAdmin.username} -> ${updatedAdmin.username} (${id})`
+      `[AUDIT] Admin ${adminId} mengubah admin ${updatedAdmin.username}`,
     );
+
     return res.status(200).json({
       success: true,
       data: updatedAdmin,
@@ -736,6 +802,7 @@ const updateAdmin = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Admin Error:", error);
+
     try {
       await prisma.auditLog.create({
         data: {
@@ -747,15 +814,19 @@ const updateAdmin = async (req, res) => {
           entityId: req.params?.id || "N/A",
           bookingId: null,
           before: null,
-          after: { error: error?.message || "Unhandled error" },
+          after: {
+            error: error.message,
+          },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         },
       });
     } catch (_) {}
-    return res
-      .status(500)
-      .json({ success: false, error: "Failed to update admin" });
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to update admin",
+    });
   }
 };
 
@@ -861,7 +932,7 @@ const deleteAdmin = async (req, res) => {
     });
 
     console.info(
-      `[AUDIT] Admin ${executorId} melakukan soft delete admin ${existingAdmin.username} (${existingAdmin.id})`
+      `[AUDIT] Admin ${executorId} melakukan soft delete admin ${existingAdmin.username} (${existingAdmin.id})`,
     );
 
     return res.status(200).json({

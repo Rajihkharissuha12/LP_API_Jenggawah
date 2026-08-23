@@ -463,7 +463,7 @@ const createPenjualan = async (req, res) => {
           },
         });
       }
-      const get = await tx.cashSession.findFirst({
+      const get = await prisma.cashSession.findFirst({
         where: {
           adminId: adminId,
           status: "OPEN",
@@ -490,7 +490,7 @@ const createPenjualan = async (req, res) => {
       }
 
       if (changeAmount > 0 && payment.method === "CASH") {
-        await tx.cashSession.update({
+        await prisma.cashSession.update({
           where: {
             id: get.id,
           },

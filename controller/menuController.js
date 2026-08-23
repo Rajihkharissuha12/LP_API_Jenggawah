@@ -474,6 +474,7 @@ const createMenu = async (req, res) => {
 
 const getAllMenu = async (req, res) => {
   console.log("SEMUA MENU");
+  const adminId = req.user.id;
 
   try {
     const {
@@ -589,12 +590,23 @@ const getAllMenu = async (req, res) => {
       };
     });
 
+    const shift = await prisma.cashSession.findFirst({
+      where: {
+        adminId: adminId,
+        status: "OPEN",
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
     return res.status(200).json({
       success: true,
 
       message: "Berhasil mengambil data menu",
 
       data: menuWithWarning,
+      sisaCash: shift.openingCash,
 
       pagination: {
         page: currentPage,

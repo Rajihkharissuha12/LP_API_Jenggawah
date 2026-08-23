@@ -1,4 +1,5 @@
 const { PrismaClient } = require("@prisma/client");
+const { fromZonedTime, toZonedTime } = require("date-fns-tz");
 
 const prisma = new PrismaClient();
 
@@ -27,10 +28,18 @@ const getTotalTransactionToday = async (req, res) => {
       },
     });
 
+    const configtax = await prisma.config.findFirst({
+      where: {
+        name: "tax",
+      },
+    });
+    console.log(configtax);
+
     return res.status(200).json({
       message: "Berhasil mengambil total transaksi hari ini",
       data: {
         totalTransactionToday,
+        configtax: configtax.value,
       },
     });
   } catch (error) {
@@ -58,6 +67,7 @@ const createPenjualan = async (req, res) => {
       notes,
       details,
       payment,
+      grandTotal,
     } = req.body;
     console.log(req.body);
 
@@ -198,8 +208,6 @@ const createPenjualan = async (req, res) => {
     // 7. GRAND TOTAL
     // =========================================
 
-    const grandTotal = afterDiscount + taxAmount;
-
     let paidAmount = 0;
     let changeAmount = 0;
 
@@ -225,10 +233,13 @@ const createPenjualan = async (req, res) => {
     // 8. NOMOR INVOICE
     // =========================================
 
+    const timeZone = "Asia/Jakarta";
+
     const now = new Date();
 
+    // Tetap untuk nomor invoice
     const formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Jakarta",
+      timeZone,
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -236,14 +247,15 @@ const createPenjualan = async (req, res) => {
 
     const dateString = formatter.format(now).replace(/-/g, "");
 
-    // Contoh:
-    // TRX-20260722-001
+    // Awal hari WIB
+    const start = toZonedTime(now, timeZone);
+    start.setHours(0, 0, 0, 0);
+    const startOfDay = fromZonedTime(start, timeZone);
 
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
-
-    const endOfDay = new Date(now);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Akhir hari WIB
+    const end = toZonedTime(now, timeZone);
+    end.setHours(23, 59, 59, 999);
+    const endOfDay = fromZonedTime(end, timeZone);
 
     const totalToday = await prisma.penjualan.count({
       where: {
@@ -354,6 +366,19 @@ const createPenjualan = async (req, res) => {
       }
 
       // ==========================================
+      // 4. CREATE Session
+      // ==========================================
+
+      const createSession = await prisma.cashSession.findFirst({
+        where: {
+          adminId: adminId,
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+
+      // ==========================================
       // 4. CREATE PENJUALAN
       // ==========================================
 
@@ -363,6 +388,8 @@ const createPenjualan = async (req, res) => {
           queueNumber,
 
           adminId,
+
+          cashSessionId: createSession.id,
 
           customerName: customerName || null,
 
@@ -436,6 +463,44 @@ const createPenjualan = async (req, res) => {
           },
         });
       }
+      const get = await prisma.cashSession.findFirst({
+        where: {
+          adminId: adminId,
+          status: "OPEN",
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+
+      if (payment.method === "CASH") {
+        await prisma.cashSession.update({
+          where: {
+            id: get.id,
+          },
+          data: {
+            openingCash: {
+              increment: payment.paidAmount,
+            },
+            totalCashIn: {
+              increment: grandTotal,
+            },
+          },
+        });
+      }
+
+      if (changeAmount > 0 && payment.method === "CASH") {
+        await prisma.cashSession.update({
+          where: {
+            id: get.id,
+          },
+          data: {
+            openingCash: {
+              decrement: payment.changeAmount,
+            },
+          },
+        });
+      }
 
       // ==========================================
       // 6. RETURN PENJUALAN
@@ -457,6 +522,7 @@ const createPenjualan = async (req, res) => {
         },
       });
     });
+    console.log("PENJUALAN BERHASIL DI BUAT");
 
     return res.status(201).json({
       message: "Order berhasil dibuat",
@@ -468,6 +534,581 @@ const createPenjualan = async (req, res) => {
     return res.status(500).json({
       message: "Gagal membuat order",
       error: error.message,
+    });
+  }
+};
+
+const updatePenjualanItems = async (req, res) => {
+  console.log("UPDATE PENJUALAN ITEMS");
+
+  try {
+    const { id } = req.params;
+    const { payload } = req.body;
+    const items = payload.items;
+    const payment = payload.payment;
+    const service = payload.service;
+    console.log(payment);
+    console.log(payload.service);
+
+    // =====================================================
+    // 1. VALIDASI REQUEST
+    // =====================================================
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "ID transaksi wajib diisi",
+      });
+    }
+
+    if (!Array.isArray(items)) {
+      return res.status(400).json({
+        success: false,
+        message: "Items harus berupa array",
+      });
+    }
+
+    if (items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimal ada satu menu dalam transaksi",
+      });
+    }
+
+    if (payment !== null && payment !== undefined) {
+      if (typeof payment !== "object" || Array.isArray(payment)) {
+        return res.status(400).json({
+          success: false,
+          message: "Data payment tidak valid",
+        });
+      }
+    }
+
+    // =====================================================
+    // 2. TRANSACTION DATABASE
+    // =====================================================
+
+    const result = await prisma.$transaction(async (tx) => {
+      // =====================================================
+      // 2.1 AMBIL TRANSAKSI LAMA
+      // =====================================================
+
+      const transaction = await tx.penjualan.findUnique({
+        where: {
+          id,
+        },
+        include: {
+          details: {
+            include: {
+              recipes: true,
+            },
+          },
+        },
+      });
+
+      if (!transaction) {
+        throw new Error("Transaksi tidak ditemukan");
+      }
+
+      // =====================================================
+      // 3. VALIDASI MENU BARU
+      // =====================================================
+
+      const menuIds = [...new Set(items.map((item) => item.menuId))];
+
+      const menus = await tx.menu.findMany({
+        where: {
+          id: {
+            in: menuIds,
+          },
+          isDeleted: false,
+          isActive: true,
+        },
+        include: {
+          recipes: {
+            include: {
+              bahan: true,
+            },
+          },
+        },
+      });
+
+      if (menus.length !== menuIds.length) {
+        throw new Error("Ada menu yang tidak ditemukan atau tidak aktif");
+      }
+
+      // =====================================================
+      // 4. BUAT MAP MENU
+      // =====================================================
+
+      const menuMap = new Map(menus.map((menu) => [menu.id, menu]));
+
+      // =====================================================
+      // 5. HITUNG STOK LAMA
+      //
+      // Stok lama sebelumnya sudah dikurangi ketika
+      // transaksi dibuat.
+      // =====================================================
+
+      const oldBahanUsage = new Map();
+
+      for (const detail of transaction.details) {
+        const menu = menuMap.get(detail.menuId);
+
+        if (!menu) {
+          throw new Error(`Menu ${detail.menuId} tidak ditemukan`);
+        }
+
+        const qty = Number(detail.qty);
+
+        for (const recipe of menu.recipes) {
+          const usage = Number(recipe.qty) * qty;
+
+          const current = oldBahanUsage.get(recipe.bahanId) || 0;
+
+          oldBahanUsage.set(recipe.bahanId, current + usage);
+        }
+      }
+
+      // =====================================================
+      // 6. HITUNG STOK BARU
+      // =====================================================
+
+      const newBahanUsage = new Map();
+
+      for (const item of items) {
+        const menu = menuMap.get(item.menuId);
+
+        if (!menu) {
+          throw new Error(`Menu ${item.menuId} tidak ditemukan`);
+        }
+
+        const qty = Number(item.qty);
+
+        if (!Number.isInteger(qty) || qty <= 0) {
+          throw new Error(`Qty menu ${menu.nama} tidak valid`);
+        }
+
+        for (const recipe of menu.recipes) {
+          const usage = Number(recipe.qty) * qty;
+
+          const current = newBahanUsage.get(recipe.bahanId) || 0;
+
+          newBahanUsage.set(recipe.bahanId, current + usage);
+        }
+      }
+
+      // =====================================================
+      // 7. HITUNG SELISIH STOK
+      //
+      // positive = stok harus dikurangi
+      // negative = stok harus dikembalikan
+      // =====================================================
+
+      const bahanIds = new Set([
+        ...oldBahanUsage.keys(),
+        ...newBahanUsage.keys(),
+      ]);
+
+      const stockChanges = new Map();
+
+      for (const bahanId of bahanIds) {
+        const oldUsage = oldBahanUsage.get(bahanId) || 0;
+
+        const newUsage = newBahanUsage.get(bahanId) || 0;
+
+        const difference = newUsage - oldUsage;
+
+        if (difference !== 0) {
+          stockChanges.set(bahanId, difference);
+        }
+      }
+
+      // =====================================================
+      // 8. VALIDASI STOK
+      // =====================================================
+
+      for (const [bahanId, difference] of stockChanges) {
+        // Kalau stok tidak bertambah kebutuhannya,
+        // tidak perlu validasi stok tersedia.
+        if (difference <= 0) {
+          continue;
+        }
+
+        const bahan = await tx.bahan.findUnique({
+          where: {
+            id: bahanId,
+          },
+        });
+
+        if (!bahan) {
+          throw new Error(`Bahan ${bahanId} tidak ditemukan`);
+        }
+
+        if (bahan.isDeleted) {
+          throw new Error(`Bahan ${bahan.nama} sudah dihapus`);
+        }
+
+        if (Number(bahan.stok) < difference) {
+          throw new Error(
+            `Stok bahan ${bahan.nama} tidak cukup. ` +
+              `Stok tersedia: ${bahan.stok}, ` +
+              `tambahan dibutuhkan: ${difference}`,
+          );
+        }
+      }
+
+      // =====================================================
+      // 9. UPDATE STOK
+      // =====================================================
+
+      for (const [bahanId, difference] of stockChanges) {
+        await tx.bahan.update({
+          where: {
+            id: bahanId,
+          },
+          data: {
+            stok:
+              difference > 0
+                ? {
+                    decrement: difference,
+                  }
+                : {
+                    increment: Math.abs(difference),
+                  },
+          },
+        });
+      }
+
+      // =====================================================
+      // 10. HAPUS DETAIL LAMA
+      //
+      // recipes detail lama ikut terhapus karena
+      // relasi cascade.
+      // =====================================================
+
+      await tx.penjualanDetail.deleteMany({
+        where: {
+          penjualanId: id,
+        },
+      });
+
+      // =====================================================
+      // 11. BUAT DETAIL BARU
+      // =====================================================
+
+      const detailData = [];
+
+      let subtotal = 0;
+      let totalItem = 0;
+
+      for (const item of items) {
+        const menu = menuMap.get(item.menuId);
+
+        if (!menu) {
+          throw new Error(`Menu ${item.menuId} tidak ditemukan`);
+        }
+
+        const qty = Number(item.qty);
+
+        if (!Number.isInteger(qty) || qty <= 0) {
+          throw new Error(`Qty menu ${menu.nama} tidak valid`);
+        }
+
+        const itemSubtotal = Number(menu.hargaJual) * qty;
+
+        subtotal += itemSubtotal;
+        totalItem += qty;
+
+        detailData.push({
+          menuId: menu.id,
+          namaMenu: menu.nama,
+          hargaJual: menu.hargaJual,
+          hpp: menu.hpp,
+          qty,
+          subtotal: itemSubtotal,
+          catatan: item.catatan || null,
+
+          recipes: {
+            create: menu.recipes.map((recipe) => ({
+              bahanId: recipe.bahanId,
+              namaBahan: recipe.bahan.nama,
+              qty: Number(recipe.qty),
+              hargaPerUnit: recipe.bahan.hargaPerSatuan,
+              totalHpp:
+                Number(recipe.qty) * Number(recipe.bahan.hargaPerSatuan),
+            })),
+          },
+        });
+      }
+
+      // =====================================================
+      // 12. HITUNG DISKON
+      // =====================================================
+
+      const discount = Math.max(
+        0,
+        Math.min(Number(transaction.discountAmount || 0), subtotal),
+      );
+
+      const afterDiscount = subtotal - discount;
+
+      // =====================================================
+      // 13. HITUNG PAJAK
+      // =====================================================
+
+      let taxAmount = 0;
+
+      if (transaction.isTaxEnabled) {
+        taxAmount = Math.round(
+          afterDiscount * (Number(transaction.taxPercent || 0) / 100),
+        );
+      }
+
+      // =====================================================
+      // 14. HITUNG GRAND TOTAL
+      // =====================================================
+
+      const grandTotal =
+        Number(afterDiscount) + Number(taxAmount) + Number(service);
+      console.log(afterDiscount);
+      console.log(taxAmount);
+      console.log(service);
+
+      // Selisih dengan grand total sebelumnya
+      const difference = grandTotal - Number(transaction.grandTotal);
+
+      // =====================================================
+      // 15. HANDLE PAYMENT
+      // =====================================================
+
+      // -----------------------------------------------------
+      // PAYMENT TAMBAHAN
+      // -----------------------------------------------------
+
+      if (difference > 0) {
+        if (!payment) {
+          throw new Error("Data pembayaran tambahan wajib diisi");
+        }
+
+        if (!payment.method) {
+          throw new Error("Metode pembayaran wajib dipilih");
+        }
+
+        const paidAmount = Number(payment.paidAmount || 0);
+
+        if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
+          throw new Error("Nominal pembayaran tidak valid");
+        }
+
+        // Customer minimal harus membayar sebesar
+        // selisih transaksi.
+        if (paidAmount < difference) {
+          throw new Error(
+            `Nominal pembayaran tidak cukup. ` +
+              `Minimal Rp${difference.toLocaleString("id-ID")}`,
+          );
+        }
+
+        const changeAmount = Math.max(0, paidAmount - difference);
+
+        // =====================================================
+        // UPDATE CASH SESSION
+        // =====================================================
+
+        if (payment.method === "CASH") {
+          const cashSession = await tx.cashSession.findFirst({
+            where: {
+              adminId: transaction.adminId,
+              status: "OPEN",
+              isdeleted: false,
+            },
+            orderBy: {
+              openedAt: "desc",
+            },
+          });
+
+          if (!cashSession) {
+            throw new Error("Cash session yang aktif tidak ditemukan");
+          }
+
+          console.log("UANG DI KASIH ", paidAmount);
+          console.log("YANG HARUS DI BAYAR ", payment.amount);
+          console.log("UANG YANG DI KEMBALIKAN ", payment.changeAmount);
+          await tx.cashSession.update({
+            where: {
+              id: cashSession.id,
+            },
+            data: {
+              openingCash: {
+                increment: paidAmount,
+              },
+              totalCashIn: {
+                increment: payment.amount,
+              },
+            },
+          });
+        }
+
+        // ---------------------------------------------------
+        // NON CASH WAJIB ADA BUKTI
+        // ---------------------------------------------------
+
+        if (payment.method !== "CASH") {
+          if (!payment.proofImagePath && !payment.proofImageUrl) {
+            throw new Error("Bukti transaksi wajib diupload");
+          }
+        }
+
+        await tx.penjualanPayment.create({
+          data: {
+            penjualanId: transaction.id,
+
+            method: payment.method,
+
+            // Nominal yang benar-benar menjadi
+            // tambahan transaksi.
+            amount: difference,
+
+            // Nominal uang yang dibayarkan customer.
+            paidAmount,
+
+            // Kembalian.
+            changeAmount,
+
+            proofImagePath: payment.proofImagePath || null,
+
+            proofImageUrl: payment.proofImageUrl || null,
+
+            referenceNo: payment.referenceNo || null,
+
+            notes: payment.notes || "Adjust Menu Tambah",
+          },
+        });
+      }
+
+      // -----------------------------------------------------
+      // TIDAK ADA SELISIH
+      // -----------------------------------------------------
+
+      // difference === 0
+      // Tidak perlu membuat payment baru.
+
+      // -----------------------------------------------------
+      // REFUND
+      // -----------------------------------------------------
+
+      if (difference < 0) {
+        const refundAmount = Math.abs(difference);
+
+        const cashSession = await tx.cashSession.findFirst({
+          where: {
+            adminId: transaction.adminId,
+            status: "OPEN",
+            isdeleted: false,
+          },
+          orderBy: {
+            openedAt: "desc",
+          },
+        });
+
+        if (!cashSession) {
+          throw new Error("Cash session yang aktif tidak ditemukan");
+        }
+
+        await tx.cashSession.update({
+          where: {
+            id: cashSession.id,
+          },
+          data: {
+            openingCash: {
+              decrement: payment.changeAmount,
+            },
+          },
+        });
+
+        await tx.penjualanPayment.create({
+          data: {
+            penjualanId: transaction.id,
+
+            // Refund sementara menggunakan CASH.
+            method: "CASH",
+
+            // Tidak ada pembayaran masuk.
+            amount: 0,
+
+            paidAmount: 0,
+
+            // Nilai uang yang harus dikembalikan.
+            changeAmount: refundAmount,
+
+            // Untuk refund sementara tidak ada
+            // bukti pembayaran masuk.
+            proofImagePath: null,
+            proofImageUrl: null,
+            referenceNo: null,
+
+            notes: payment?.notes || "Adjust Pengembalian",
+          },
+        });
+      }
+
+      // =====================================================
+      // 16. UPDATE PENJUALAN
+      // =====================================================
+
+      console.log("GRANT total ", grandTotal);
+      const updatedTransaction = await tx.penjualan.update({
+        where: {
+          id,
+        },
+
+        data: {
+          subtotal,
+          discountAmount: discount,
+          taxAmount,
+          grandTotal,
+
+          totalItem,
+
+          details: {
+            create: detailData,
+          },
+        },
+
+        include: {
+          details: {
+            include: {
+              recipes: true,
+            },
+          },
+
+          payments: true,
+        },
+      });
+
+      return updatedTransaction;
+    });
+
+    // =====================================================
+    // 17. RESPONSE
+    // =====================================================
+
+    console.log("UPDATE PENJUALAN BERHASIL");
+
+    console.log(result);
+
+    return res.status(200).json({
+      success: true,
+      message: "Pesanan berhasil diperbarui",
+      data: result,
+    });
+  } catch (error) {
+    console.error("UPDATE PENJUALAN ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Gagal memperbarui pesanan",
     });
   }
 };
@@ -610,6 +1251,7 @@ const payPenjualan = async (req, res) => {
 };
 
 const getDashboardSummary = async (req, res) => {
+  const adminId = req.user.id;
   try {
     // ==========================================
     // DATE RANGE
@@ -633,6 +1275,11 @@ const getDashboardSummary = async (req, res) => {
           gte: startOfDay,
           lte: endOfDay,
         },
+        cashSession: {
+          adminId: adminId,
+          status: "OPEN",
+          closedAt: null,
+        },
       },
 
       include: {
@@ -643,6 +1290,7 @@ const getDashboardSummary = async (req, res) => {
         createdAt: "asc",
       },
     });
+    console.log("DASHBOARD ", penjualanHariIni);
 
     // ==========================================
     // 2. PENJUALAN SELESAI / PAID
@@ -869,6 +1517,11 @@ const getDashboardSummary = async (req, res) => {
         // Hanya transaksi yang sudah dibayar
         penjualan: {
           paymentStatus: "PAID",
+          cashSession: {
+            adminId: adminId,
+            status: "OPEN",
+            closedAt: null,
+          },
         },
       },
 
@@ -876,16 +1529,53 @@ const getDashboardSummary = async (req, res) => {
         paidAmount: true,
         amount: true,
         changeAmount: true,
+        method: true,
       },
     });
-    console.log(pembayaranHariIni);
 
     const cashIn = pembayaranHariIni.reduce(
       (total, payment) =>
         total + Number(payment.paidAmount) - Number(payment.changeAmount),
       0,
     );
-    console.log(cashIn);
+
+    const paymentSummary = {
+      cash: {
+        count: 0,
+        total: 0,
+      },
+
+      transfer: {
+        count: 0,
+        total: 0,
+      },
+
+      qris: {
+        count: 0,
+        total: 0,
+      },
+    };
+
+    for (const payment of pembayaranHariIni) {
+      const amount = Number(payment.paidAmount) - Number(payment.changeAmount);
+
+      switch (payment.method) {
+        case "CASH":
+          paymentSummary.cash.count += 1;
+          paymentSummary.cash.total += amount;
+          break;
+
+        case "TRANSFER":
+          paymentSummary.transfer.count += 1;
+          paymentSummary.transfer.total += amount;
+          break;
+
+        case "QRIS":
+          paymentSummary.qris.count += 1;
+          paymentSummary.qris.total += amount;
+          break;
+      }
+    }
 
     // ==========================================
     // KAS KELUAR
@@ -1048,6 +1738,8 @@ const getDashboardSummary = async (req, res) => {
           cashOut,
 
           balance,
+
+          payment: paymentSummary,
         },
 
         // ======================================
@@ -1071,6 +1763,7 @@ const getDashboardSummary = async (req, res) => {
 };
 
 const getDataTransactionToday = async (req, res) => {
+  const adminId = req.user.id;
   try {
     // Awal hari ini
     const startOfDay = new Date();
@@ -1086,11 +1779,17 @@ const getDataTransactionToday = async (req, res) => {
           gte: startOfDay,
           lte: endOfDay,
         },
+        cashSession: {
+          adminId: adminId,
+          status: "OPEN",
+          closedAt: null,
+        },
       },
       orderBy: {
         createdAt: "desc",
       },
     });
+    console.log(transactionToday);
 
     return res.status(200).json({
       message: "Berhasil mengambil data transaksi hari ini",
@@ -1101,6 +1800,71 @@ const getDataTransactionToday = async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       message: "Gagal mengambil  transaksi hari ini",
+      error: error.message,
+    });
+  }
+};
+
+const getTransactionDetail = async (req, res) => {
+  console.log("GET DETAIL TRANSACTION");
+  try {
+    const { id } = req.params;
+    console.log(id);
+
+    if (!id) {
+      return res.status(400).json({
+        message: "ID transaksi wajib diisi",
+      });
+    }
+
+    const transaction = await prisma.penjualan.findUnique({
+      where: {
+        id,
+      },
+
+      include: {
+        admin: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+
+        cashSession: {
+          include: {
+            admin: {
+              select: {
+                username: true,
+              },
+            },
+          },
+        },
+
+        details: true,
+
+        payments: true,
+      },
+    });
+
+    if (!transaction) {
+      return res.status(404).json({
+        message: "Transaksi tidak ditemukan",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Berhasil mengambil detail transaksi",
+      data: {
+        transaction,
+      },
+    });
+  } catch (error) {
+    console.error("GET TRANSACTION DETAIL ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Gagal mengambil detail transaksi",
       error: error.message,
     });
   }
@@ -1134,6 +1898,326 @@ const updateStatusPenjualan = async (req, res) => {
   }
 };
 
+const getAllTransaction = async (req, res) => {
+  try {
+    const {
+      search = "",
+      status,
+      paymentStatus,
+      orderType,
+      adminId,
+      cashSessionId,
+      dateFrom,
+      dateTo,
+      cursor,
+      limit = "20",
+    } = req.query;
+
+    // =========================
+    // PAGINATION
+    // =========================
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+
+    // =========================
+    // WHERE
+    // =========================
+    const where = {};
+
+    // =========================
+    // SEARCH
+    // =========================
+    if (search.trim()) {
+      const keyword = search.trim();
+
+      where.OR = [
+        {
+          nomorInvoice: {
+            contains: keyword,
+            mode: "insensitive",
+          },
+        },
+        {
+          queueNumber: {
+            contains: keyword,
+            mode: "insensitive",
+          },
+        },
+        {
+          customerName: {
+            contains: keyword,
+            mode: "insensitive",
+          },
+        },
+        {
+          tableNumber: {
+            contains: keyword,
+            mode: "insensitive",
+          },
+        },
+      ];
+    }
+
+    // =========================
+    // FILTER STATUS
+    // =========================
+    if (status) {
+      where.status = status;
+    }
+
+    if (paymentStatus) {
+      where.paymentStatus = paymentStatus;
+    }
+
+    if (orderType) {
+      where.orderType = orderType;
+    }
+
+    // =========================
+    // FILTER ADMIN / KASIR
+    // =========================
+    if (adminId) {
+      where.adminId = adminId;
+    }
+
+    // =========================
+    // FILTER CASH SESSION
+    // =========================
+    if (cashSessionId) {
+      where.cashSessionId = cashSessionId;
+    }
+
+    // =========================
+    // FILTER TANGGAL
+    // =========================
+    if (dateFrom || dateTo) {
+      where.createdAt = {};
+
+      if (dateFrom) {
+        const startDate = new Date(dateFrom);
+
+        if (isNaN(startDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message: "Format dateFrom tidak valid",
+          });
+        }
+
+        // Mulai dari 00:00:00
+        startDate.setHours(0, 0, 0, 0);
+
+        where.createdAt.gte = startDate;
+      }
+
+      if (dateTo) {
+        const endDate = new Date(dateTo);
+
+        if (isNaN(endDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message: "Format dateTo tidak valid",
+          });
+        }
+
+        // Sampai 23:59:59
+        endDate.setHours(23, 59, 59, 999);
+
+        where.createdAt.lte = endDate;
+      }
+    }
+
+    // =========================
+    // TOTAL DATA
+    // =========================
+    const total = await prisma.penjualan.count({
+      where,
+    });
+
+    // =========================
+    // QUERY DATA
+    // =========================
+    const transactions = await prisma.penjualan.findMany({
+      where,
+
+      take: parsedLimit + 1,
+
+      ...(cursor
+        ? {
+            cursor: {
+              id: cursor,
+            },
+            skip: 1,
+          }
+        : {}),
+
+      orderBy: {
+        createdAt: "desc",
+      },
+
+      select: {
+        id: true,
+        nomorInvoice: true,
+        queueNumber: true,
+
+        customerName: true,
+
+        orderType: true,
+        tableNumber: true,
+
+        subtotal: true,
+        discountAmount: true,
+        discountPercent: true,
+
+        isTaxEnabled: true,
+        taxPercent: true,
+        taxRate: true,
+        taxAmount: true,
+
+        grandTotal: true,
+
+        status: true,
+        notes: true,
+
+        totalItem: true,
+
+        paymentStatus: true,
+
+        paidAt: true,
+        printedAt: true,
+
+        createdAt: true,
+        updatedAt: true,
+
+        // =========================
+        // KASIR
+        // =========================
+        admin: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+
+        // =========================
+        // CASH SESSION
+        // =========================
+        cashSession: {
+          select: {
+            admin: {
+              select: {
+                username: true,
+              },
+            },
+          },
+        },
+
+        // =========================
+        // DETAIL TRANSAKSI
+        // =========================
+        details: {
+          select: {
+            id: true,
+            penjualanId: true,
+            menuId: true,
+            namaMenu: true,
+            catatan: true,
+            hargaJual: true,
+            hpp: true,
+            qty: true,
+            subtotal: true,
+            fotoMenu: true,
+            categoryName: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+
+        // =========================
+        // PAYMENT
+        // =========================
+        payments: {
+          select: {
+            id: true,
+            penjualanId: true,
+
+            method: true,
+
+            amount: true,
+            paidAmount: true,
+            changeAmount: true,
+            method: true,
+
+            proofImagePath: true,
+            proofImageUrl: true,
+
+            referenceNo: true,
+            notes: true,
+
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    // =========================
+    // CEK HAS MORE
+    // =========================
+    const hasMore = transactions.length > parsedLimit;
+
+    const data = hasMore ? transactions.slice(0, parsedLimit) : transactions;
+
+    // =====================================================
+    // PERHITUNGAN UANG DARI DATA YANG SEDANG DITAMPILKAN
+    // =====================================================
+
+    let uangMasuk = 0;
+    let uangKeluar = 0;
+
+    for (const transaction of data) {
+      // Hanya transaksi yang sudah PAID
+      if (transaction.paymentStatus === "PAID") {
+        for (const payment of transaction.payments) {
+          uangMasuk += Number(payment.amount || 0);
+        }
+      }
+    }
+
+    // =========================
+    // NEXT CURSOR
+    // =========================
+    const nextCursor =
+      hasMore && data.length > 0 ? data[data.length - 1].id : null;
+
+    // =========================
+    // RESPONSE
+    // =========================
+    return res.status(200).json({
+      success: true,
+      message: "Berhasil mengambil data transaksi",
+
+      data,
+
+      summary: {
+        uangMasuk,
+      },
+
+      pagination: {
+        total,
+        limit: parsedLimit,
+        hasMore,
+        nextCursor,
+      },
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({
+      success: false,
+      message: "Gagal mengambil data transaksi",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getTotalTransactionToday,
   getDataTransactionToday,
@@ -1141,4 +2225,7 @@ module.exports = {
   getDashboardSummary,
   payPenjualan,
   updateStatusPenjualan,
+  getAllTransaction,
+  getTransactionDetail,
+  updatePenjualanItems,
 };

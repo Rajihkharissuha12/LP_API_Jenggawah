@@ -220,13 +220,17 @@ const loginAdmin = async (req, res) => {
 
     if (!admin || admin.isDeleted === true) {
       // Jangan bocorkan apakah username ada, tetap general
-      return res.status(401).json({ message: "Kredensial tidak valid" });
+      return res
+        .status(401)
+        .json({ success: false, message: "Kredensial tidak valid" });
     } // cek eksistensi akun [2]
 
     // Bandingkan password
     const ok = await bcrypt.compare(password, admin.password);
     if (!ok) {
-      return res.status(401).json({ message: "Kredensial tidak valid" });
+      return res
+        .status(401)
+        .json({ success: false, message: "Kredensial tidak valid" });
     } // bcrypt compare sesuai praktik [1]
 
     const roles = admin.adminRoles.map((r) => r.role);
@@ -257,6 +261,7 @@ const loginAdmin = async (req, res) => {
     }); // catat aktivitas login [4]
 
     return res.status(200).json({
+      success: true,
       message: "Login berhasil",
       data: {
         token,
@@ -268,8 +273,9 @@ const loginAdmin = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("loginAdmin error:", err);
-    return res.status(500).json({ message: "Terjadi kesalahan server" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Terjadi kesalahan server" });
   }
 };
 

@@ -1,0 +1,17 @@
+-- CreateEnum
+CREATE TYPE "StatusCashSession" AS ENUM ('OPEN', 'CLOSE');
+
+-- AlterTable
+ALTER TABLE "CashSession" ADD COLUMN     "actualCash" DECIMAL(14,2),
+ADD COLUMN     "closingNote" TEXT,
+ADD COLUMN     "createdAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN     "difference" DECIMAL(14,2),
+ADD COLUMN     "expectedCash" DECIMAL(14,2),
+ADD COLUMN     "isdeleted" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "openingCash" DECIMAL(12,2) NOT NULL DEFAULT 0,
+ADD COLUMN     "status" "StatusCashSession" NOT NULL DEFAULT 'OPEN',
+ADD COLUMN     "totalCashIn" DECIMAL(14,2) DEFAULT 0,
+ADD COLUMN     "totalCashOut" DECIMAL(14,2) DEFAULT 0,
+ADD COLUMN     "totalCashSales" DECIMAL(14,2) DEFAULT 0,
+ADD COLUMN     "totalNonCashSales" DECIMAL(14,2) DEFAULT 0,
+ADD COLUMN     "updatedAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;

@@ -1,0 +1,12 @@
+-- AlterTable
+ALTER TABLE "PenjualanDetailRecipe" ADD COLUMN     "createdAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN     "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "updatedAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+-- CreateTable
+CREATE TABLE "Config" (
+    "id" TEXT NOT NULL,
+    "tax" BOOLEAN NOT NULL DEFAULT false,
+
+    CONSTRAINT "Config_pkey" PRIMARY KEY ("id")
+);

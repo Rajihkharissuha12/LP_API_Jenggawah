@@ -8,6 +8,9 @@ const {
   getDashboardSummary,
   getDataTransactionToday,
   updateStatusPenjualan,
+  getAllTransaction,
+  getTransactionDetail,
+  updatePenjualanItems,
 } = require("../controller/penjualanController");
 
 const router = Router();
@@ -20,10 +23,24 @@ router.get(
 );
 
 router.get(
+  "/getall",
+  authenticate,
+  authorizeRoles("MANAGEMENT", "KASIR"),
+  getAllTransaction,
+);
+
+router.get(
   "/today",
   authenticate,
   authorizeRoles("MANAGEMENT", "KASIR"),
   getDataTransactionToday,
+);
+
+router.get(
+  "/detail/transaction/:id",
+  authenticate,
+  authorizeRoles("MANAGEMENT", "KASIR"),
+  getTransactionDetail,
 );
 
 router.post(
@@ -45,6 +62,13 @@ router.put(
   authenticate,
   authorizeRoles("MANAGEMENT", "KASIR"),
   updateStatusPenjualan,
+);
+
+router.put(
+  "/:id/items",
+  authenticate,
+  authorizeRoles("MANAGEMENT", "KASIR"),
+  updatePenjualanItems,
 );
 
 module.exports = router;

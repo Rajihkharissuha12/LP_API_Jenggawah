@@ -92,12 +92,12 @@ const getStatisticMutasi = async (req, res) => {
     end.setHours(23, 59, 59, 999);
 
     const data = await prisma.stokMutasi.findMany({
-      where: {
-        createdAt: {
-          gte: start,
-          lte: end,
-        },
-      },
+      // where: {
+      //   createdAt: {
+      //     gte: start,
+      //     lte: end,
+      //   },
+      // },
       select: {
         jenis: true,
       },

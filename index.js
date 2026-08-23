@@ -14,6 +14,7 @@ const stokopnameRoutes = require("./routes/opnameRoutes");
 const menuRoutes = require("./routes/menuRoutes");
 const penjualanRoutes = require("./routes/penjualanRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
+const cashSessionRoutes = require("./routes/cashSessionRoutes");
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.use("/stockopname", stokopnameRoutes);
 app.use("/penjualan", penjualanRoutes);
 app.use("/menu", menuRoutes);
 app.use("/dashboard", dashboardRoutes);
+app.use("/cashsession", cashSessionRoutes);
 
 // Route test
 app.get("/", (req, res) => {

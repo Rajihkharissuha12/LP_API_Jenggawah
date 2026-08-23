@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "CashSession" ALTER COLUMN "closedAt" SET DATA TYPE TIMESTAMPTZ(3);

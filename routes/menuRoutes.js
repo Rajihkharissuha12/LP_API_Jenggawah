@@ -28,7 +28,7 @@ router.get(
 router.get(
   "/menu-all",
   authenticate,
-  authorizeRoles("ADMIN", "MANAGEMENT"),
+  authorizeRoles("KASIR", "ADMIN", "MANAGEMENT"),
   getAllMenu,
 );
 

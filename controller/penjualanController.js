@@ -284,244 +284,249 @@ const createPenjualan = async (req, res) => {
     // 10. TRANSACTION
     // =========================================
 
-    const penjualan = await prisma.$transaction(async (tx) => {
-      // ==========================================
-      // 1. VALIDASI & KURANGI STOK BAHAN
-      // ==========================================
+    const penjualan = await prisma.$transaction(
+      async (tx) => {
+        // ==========================================
+        // 1. VALIDASI & KURANGI STOK BAHAN
+        // ==========================================
 
-      // Map untuk menggabungkan kebutuhan bahan
-      // jika dalam satu order ada menu yang menggunakan
-      // bahan yang sama.
-      const bahanUsageMap = new Map();
+        // Map untuk menggabungkan kebutuhan bahan
+        // jika dalam satu order ada menu yang menggunakan
+        // bahan yang sama.
+        const bahanUsageMap = new Map();
 
-      for (const item of details) {
-        const menu = menus.find((menu) => menu.id === item.menuId);
+        for (const item of details) {
+          const menu = menus.find((menu) => menu.id === item.menuId);
 
-        if (!menu) {
-          throw new Error(`Menu ${item.menuId} tidak ditemukan`);
-        }
+          if (!menu) {
+            throw new Error(`Menu ${item.menuId} tidak ditemukan`);
+          }
 
-        const menuQty = Number(item.qty);
+          const menuQty = Number(item.qty);
 
-        for (const recipe of menu.recipes) {
-          const bahanId = recipe.bahanId;
+          for (const recipe of menu.recipes) {
+            const bahanId = recipe.bahanId;
 
-          // Kebutuhan bahan untuk menu ini
-          const kebutuhanBahan = Number(recipe.qty) * menuQty;
+            // Kebutuhan bahan untuk menu ini
+            const kebutuhanBahan = Number(recipe.qty) * menuQty;
 
-          if (bahanUsageMap.has(bahanId)) {
-            bahanUsageMap.set(
-              bahanId,
-              bahanUsageMap.get(bahanId) + kebutuhanBahan,
-            );
-          } else {
-            bahanUsageMap.set(bahanId, kebutuhanBahan);
+            if (bahanUsageMap.has(bahanId)) {
+              bahanUsageMap.set(
+                bahanId,
+                bahanUsageMap.get(bahanId) + kebutuhanBahan,
+              );
+            } else {
+              bahanUsageMap.set(bahanId, kebutuhanBahan);
+            }
           }
         }
-      }
 
-      // ==========================================
-      // 2. CEK STOK SEMUA BAHAN
-      // ==========================================
+        // ==========================================
+        // 2. CEK STOK SEMUA BAHAN
+        // ==========================================
 
-      for (const [bahanId, totalUsage] of bahanUsageMap) {
-        const bahan = await tx.bahan.findUnique({
-          where: {
-            id: bahanId,
-          },
-        });
+        for (const [bahanId, totalUsage] of bahanUsageMap) {
+          const bahan = await tx.bahan.findUnique({
+            where: {
+              id: bahanId,
+            },
+          });
 
-        if (!bahan) {
-          throw new Error(`Bahan dengan ID ${bahanId} tidak ditemukan`);
+          if (!bahan) {
+            throw new Error(`Bahan dengan ID ${bahanId} tidak ditemukan`);
+          }
+
+          if (bahan.isDeleted) {
+            throw new Error(`Bahan ${bahan.nama} sudah dihapus`);
+          }
+
+          if (Number(bahan.stok) < totalUsage) {
+            throw new Error(
+              `Stok bahan ${bahan.nama} tidak cukup. ` +
+                `Stok tersedia: ${bahan.stok}, ` +
+                `dibutuhkan: ${totalUsage}`,
+            );
+          }
         }
 
-        if (bahan.isDeleted) {
-          throw new Error(`Bahan ${bahan.nama} sudah dihapus`);
+        // ==========================================
+        // 3. KURANGI STOK BAHAN
+        // ==========================================
+
+        for (const [bahanId, totalUsage] of bahanUsageMap) {
+          await tx.bahan.update({
+            where: {
+              id: bahanId,
+            },
+            data: {
+              stok: {
+                decrement: totalUsage,
+              },
+            },
+          });
         }
 
-        if (Number(bahan.stok) < totalUsage) {
-          throw new Error(
-            `Stok bahan ${bahan.nama} tidak cukup. ` +
-              `Stok tersedia: ${bahan.stok}, ` +
-              `dibutuhkan: ${totalUsage}`,
-          );
+        // ==========================================
+        // 4. CREATE Session
+        // ==========================================
+
+        const createSession = await tx.cashSession.findFirst({
+          where: {
+            adminId: adminId,
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        });
+
+        // ==========================================
+        // 4. CREATE PENJUALAN
+        // ==========================================
+
+        const penjualan = await tx.penjualan.create({
+          data: {
+            nomorInvoice,
+            queueNumber,
+
+            adminId,
+
+            cashSessionId: createSession.id,
+
+            customerName: customerName || null,
+
+            orderType,
+
+            tableNumber: orderType === "DINE_IN" ? tableNumber : null,
+
+            subtotal,
+
+            discountAmount: discount,
+
+            isTaxEnabled,
+
+            taxPercent: isTaxEnabled ? Number(taxPercent) : 0,
+
+            taxRate: isTaxEnabled ? Number(taxPercent) / 100 : 0,
+
+            taxAmount,
+
+            grandTotal,
+
+            status: "PREPARING",
+
+            paymentStatus,
+
+            paidAt,
+
+            notes: notes || null,
+
+            totalItem,
+
+            details: {
+              create: detailData,
+            },
+          },
+
+          include: {
+            details: {
+              include: {
+                recipes: true,
+              },
+            },
+          },
+        });
+
+        // ==========================================
+        // 5. CREATE PAYMENT
+        // HANYA JIKA BAYAR SEKARANG
+        // ==========================================
+
+        if (isPayNow) {
+          await tx.penjualanPayment.create({
+            data: {
+              penjualanId: penjualan.id,
+
+              method: payment.method,
+
+              amount: grandTotal,
+
+              paidAmount,
+
+              changeAmount,
+
+              referenceNo: payment.referenceNo || null,
+
+              notes: payment.notes || null,
+
+              proofImagePath: payment.proofImagePath || null,
+
+              proofImageUrl: payment.proofImageUrl || null,
+            },
+          });
         }
-      }
-
-      // ==========================================
-      // 3. KURANGI STOK BAHAN
-      // ==========================================
-
-      for (const [bahanId, totalUsage] of bahanUsageMap) {
-        await tx.bahan.update({
+        const get = await prisma.cashSession.findFirst({
           where: {
-            id: bahanId,
+            adminId: adminId,
+            status: "OPEN",
           },
-          data: {
-            stok: {
-              decrement: totalUsage,
-            },
-          },
-        });
-      }
-
-      // ==========================================
-      // 4. CREATE Session
-      // ==========================================
-
-      const createSession = await tx.cashSession.findFirst({
-        where: {
-          adminId: adminId,
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
-
-      // ==========================================
-      // 4. CREATE PENJUALAN
-      // ==========================================
-
-      const penjualan = await tx.penjualan.create({
-        data: {
-          nomorInvoice,
-          queueNumber,
-
-          adminId,
-
-          cashSessionId: createSession.id,
-
-          customerName: customerName || null,
-
-          orderType,
-
-          tableNumber: orderType === "DINE_IN" ? tableNumber : null,
-
-          subtotal,
-
-          discountAmount: discount,
-
-          isTaxEnabled,
-
-          taxPercent: isTaxEnabled ? Number(taxPercent) : 0,
-
-          taxRate: isTaxEnabled ? Number(taxPercent) / 100 : 0,
-
-          taxAmount,
-
-          grandTotal,
-
-          status: "PREPARING",
-
-          paymentStatus,
-
-          paidAt,
-
-          notes: notes || null,
-
-          totalItem,
-
-          details: {
-            create: detailData,
-          },
-        },
-
-        include: {
-          details: {
-            include: {
-              recipes: true,
-            },
-          },
-        },
-      });
-
-      // ==========================================
-      // 5. CREATE PAYMENT
-      // HANYA JIKA BAYAR SEKARANG
-      // ==========================================
-
-      if (isPayNow) {
-        await tx.penjualanPayment.create({
-          data: {
-            penjualanId: penjualan.id,
-
-            method: payment.method,
-
-            amount: grandTotal,
-
-            paidAmount,
-
-            changeAmount,
-
-            referenceNo: payment.referenceNo || null,
-
-            notes: payment.notes || null,
-
-            proofImagePath: payment.proofImagePath || null,
-
-            proofImageUrl: payment.proofImageUrl || null,
+          orderBy: {
+            createdAt: "desc",
           },
         });
-      }
-      const get = await prisma.cashSession.findFirst({
-        where: {
-          adminId: adminId,
-          status: "OPEN",
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
 
-      if (payment.method === "CASH") {
-        await tx.cashSession.update({
+        if (payment.method === "CASH") {
+          await prisma.cashSession.update({
+            where: {
+              id: get.id,
+            },
+            data: {
+              openingCash: {
+                increment: payment.paidAmount,
+              },
+              totalCashIn: {
+                increment: grandTotal,
+              },
+            },
+          });
+        }
+
+        if (changeAmount > 0 && payment.method === "CASH") {
+          await prisma.cashSession.update({
+            where: {
+              id: get.id,
+            },
+            data: {
+              openingCash: {
+                decrement: payment.changeAmount,
+              },
+            },
+          });
+        }
+
+        // ==========================================
+        // 6. RETURN PENJUALAN
+        // ==========================================
+
+        return tx.penjualan.findUnique({
           where: {
-            id: get.id,
+            id: penjualan.id,
           },
-          data: {
-            openingCash: {
-              increment: payment.paidAmount,
+
+          include: {
+            details: {
+              include: {
+                recipes: true,
+              },
             },
-            totalCashIn: {
-              increment: grandTotal,
-            },
+
+            payments: true,
           },
         });
-      }
-
-      if (changeAmount > 0 && payment.method === "CASH") {
-        await prisma.cashSession.update({
-          where: {
-            id: get.id,
-          },
-          data: {
-            openingCash: {
-              decrement: payment.changeAmount,
-            },
-          },
-        });
-      }
-
-      // ==========================================
-      // 6. RETURN PENJUALAN
-      // ==========================================
-
-      return tx.penjualan.findUnique({
-        where: {
-          id: penjualan.id,
-        },
-
-        include: {
-          details: {
-            include: {
-              recipes: true,
-            },
-          },
-
-          payments: true,
-        },
-      });
-    });
+      },
+      {
+        timeout: 15000,
+      },
+    );
     console.log("PENJUALAN BERHASIL DI BUAT");
 
     return res.status(201).json({

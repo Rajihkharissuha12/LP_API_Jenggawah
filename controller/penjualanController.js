@@ -372,6 +372,8 @@ const createPenjualan = async (req, res) => {
         const createSession = await tx.cashSession.findFirst({
           where: {
             adminId: adminId,
+            closedAt: null,
+            status: "OPEN",
           },
           orderBy: {
             createdAt: "desc",

@@ -83,6 +83,7 @@ const cekSessionByIdAdmin = async (req, res) => {
       data: {
         status: !!getSession,
         payment: paymentSummary,
+        session: getSession,
       },
     });
   } catch (error) {
@@ -440,4 +441,151 @@ const closeShift = async (req, res) => {
   }
 };
 
-module.exports = { cekSessionByIdAdmin, openShift, closeShift, getAllSession };
+const calculateDuration = (openedAt, closedAt) => {
+  if (!closedAt) {
+    const totalMinutes = Math.floor((Date.now() - openedAt.getTime()) / 60000);
+
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+
+    return {
+      totalMinutes,
+      hours,
+      minutes,
+      formatted: `${hours} jam ${minutes} menit`,
+    };
+  }
+
+  const totalMinutes = Math.floor(
+    (closedAt.getTime() - openedAt.getTime()) / 60000,
+  );
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  return {
+    totalMinutes,
+    hours,
+    minutes,
+    formatted: `${hours} jam ${minutes} menit`,
+  };
+};
+
+const getCashSessionDetail = async (req, res) => {
+  console.log("GET DETAIL SHIFT");
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Cash session ID wajib diisi",
+      });
+    }
+
+    const cashSession = await prisma.cashSession.findFirst({
+      where: {
+        id,
+        isdeleted: false,
+      },
+
+      include: {
+        admin: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+
+        penjualans: {
+          orderBy: {
+            createdAt: "desc",
+          },
+
+          include: {
+            payments: {
+              select: {
+                id: true,
+                method: true,
+                amount: true,
+                paidAmount: true,
+                changeAmount: true,
+                proofImagePath: true,
+                proofImageUrl: true,
+                referenceNo: true,
+                notes: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!cashSession) {
+      return res.status(404).json({
+        success: false,
+        message: "Shift tidak ditemukan",
+      });
+    }
+
+    const duration = calculateDuration(
+      cashSession.openedAt,
+      cashSession.closedAt,
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Detail shift berhasil diambil",
+      data: {
+        id: cashSession.id,
+
+        admin: cashSession.admin,
+
+        locationId: cashSession.locationId,
+
+        status: cashSession.status,
+
+        openedAt: cashSession.openedAt,
+        closedAt: cashSession.closedAt,
+
+        duration,
+
+        openingCash: cashSession.openingCash,
+        expectedCash: cashSession.expectedCash,
+        actualCash: cashSession.actualCash,
+        difference: cashSession.difference,
+
+        totalCashIn: cashSession.totalCashIn,
+        totalCashOut: cashSession.totalCashOut,
+
+        totalCashSales: cashSession.totalCashSales,
+        totalNonCashSales: cashSession.totalNonCashSales,
+
+        closingNote: cashSession.closingNote,
+
+        createdAt: cashSession.createdAt,
+        updatedAt: cashSession.updatedAt,
+
+        transactions: cashSession.penjualans,
+        totalTransactions: cashSession.penjualans.length,
+      },
+    });
+  } catch (error) {
+    console.error("GET CASH SESSION DETAIL ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Gagal mengambil detail shift",
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+};
+
+module.exports = {
+  cekSessionByIdAdmin,
+  openShift,
+  closeShift,
+  getAllSession,
+  getCashSessionDetail,
+};

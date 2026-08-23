@@ -369,7 +369,7 @@ const createPenjualan = async (req, res) => {
       // 4. CREATE Session
       // ==========================================
 
-      const createSession = await prisma.cashSession.findFirst({
+      const createSession = await tx.cashSession.findFirst({
         where: {
           adminId: adminId,
         },
@@ -463,7 +463,7 @@ const createPenjualan = async (req, res) => {
           },
         });
       }
-      const get = await prisma.cashSession.findFirst({
+      const get = await tx.cashSession.findFirst({
         where: {
           adminId: adminId,
           status: "OPEN",
@@ -474,7 +474,7 @@ const createPenjualan = async (req, res) => {
       });
 
       if (payment.method === "CASH") {
-        await prisma.cashSession.update({
+        await tx.cashSession.update({
           where: {
             id: get.id,
           },
@@ -490,7 +490,7 @@ const createPenjualan = async (req, res) => {
       }
 
       if (changeAmount > 0 && payment.method === "CASH") {
-        await prisma.cashSession.update({
+        await tx.cashSession.update({
           where: {
             id: get.id,
           },
@@ -1184,51 +1184,56 @@ const payPenjualan = async (req, res) => {
     // TRANSACTION
     // ==========================================
 
-    const result = await prisma.$transaction(async (tx) => {
-      const payment = await tx.penjualanPayment.create({
-        data: {
-          penjualanId: penjualan.id,
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const payment = await tx.penjualanPayment.create({
+          data: {
+            penjualanId: penjualan.id,
 
-          method,
+            method,
 
-          amount,
+            amount,
 
-          paidAmount: paid,
+            paidAmount: paid,
 
-          changeAmount,
+            changeAmount,
 
-          referenceNo: referenceNo || null,
+            referenceNo: referenceNo || null,
 
-          notes: notes || null,
+            notes: notes || null,
 
-          proofImagePath: proofImagePath || null,
+            proofImagePath: proofImagePath || null,
 
-          proofImageUrl: proofImageUrl || null,
-        },
-      });
+            proofImageUrl: proofImageUrl || null,
+          },
+        });
 
-      const updated = await tx.penjualan.update({
-        where: {
-          id: penjualan.id,
-        },
+        const updated = await tx.penjualan.update({
+          where: {
+            id: penjualan.id,
+          },
 
-        data: {
-          paymentStatus: "PAID",
+          data: {
+            paymentStatus: "PAID",
 
-          paidAt: new Date(),
-        },
+            paidAt: new Date(),
+          },
 
-        include: {
-          payments: true,
-        },
-      });
+          include: {
+            payments: true,
+          },
+        });
 
-      return {
-        penjualan: updated,
+        return {
+          penjualan: updated,
 
-        payment,
-      };
-    });
+          payment,
+        };
+      },
+      {
+        timeout: 15000,
+      },
+    );
 
     return res.status(200).json({
       success: true,

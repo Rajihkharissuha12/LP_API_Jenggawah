@@ -58,6 +58,7 @@ const createPenjualan = async (req, res) => {
     const adminId = req.user.id;
 
     const {
+      clientRefId, // [BARU] kunci idempotency dari mobile
       customerName,
       orderType,
       tableNumber,
@@ -69,75 +70,83 @@ const createPenjualan = async (req, res) => {
       payment,
       grandTotal,
     } = req.body;
-    console.log(req.body);
+
+    // =========================================
+    // 0. [BARU] IDEMPOTENCY — CEK CEPAT DI AWAL
+    // Kalau transaksi dengan clientRefId ini sudah pernah dibuat,
+    // kembalikan yang lama. Retry dari mobile jadi aman (tidak dobel).
+    // =========================================
+    if (clientRefId) {
+      const existing = await prisma.penjualan.findUnique({
+        where: { clientRefId },
+        include: {
+          details: { include: { recipes: true } },
+          payments: true,
+        },
+      });
+
+      if (existing) {
+        console.log("IDEMPOTENT HIT:", clientRefId);
+        return res.status(200).json({
+          message: "Order sudah ada (idempotent)",
+          data: existing,
+        });
+      }
+    }
 
     // =========================================
     // 1. VALIDASI BASIC
     // =========================================
-
     if (!orderType) {
-      return res.status(400).json({
-        message: "Order type wajib diisi",
-      });
+      return res.status(400).json({ message: "Order type wajib diisi" });
     }
 
     if (!details || details.length === 0) {
-      return res.status(400).json({
-        message: "Minimal ada satu menu dalam transaksi",
-      });
+      return res
+        .status(400)
+        .json({ message: "Minimal ada satu menu dalam transaksi" });
     }
 
     const isPayNow = payment?.isPayNow === true;
 
     if (isPayNow && !payment?.method) {
-      return res.status(400).json({
-        message: "Metode pembayaran wajib diisi",
-      });
+      return res.status(400).json({ message: "Metode pembayaran wajib diisi" });
     }
 
     // =========================================
     // 2. VALIDASI DINE IN
     // =========================================
-
     if (orderType === "DINE_IN" && !tableNumber) {
-      return res.status(400).json({
-        message: "Nomor meja wajib diisi untuk Dine In",
-      });
+      return res
+        .status(400)
+        .json({ message: "Nomor meja wajib diisi untuk Dine In" });
     }
 
     // =========================================
     // 3. AMBIL MENU
     // =========================================
-
     const menuIds = details.map((item) => item.menuId);
 
     const menus = await prisma.menu.findMany({
       where: {
-        id: {
-          in: menuIds,
-        },
+        id: { in: menuIds },
         isDeleted: false,
         isActive: true,
       },
       include: {
-        recipes: {
-          include: {
-            bahan: true,
-          },
-        },
+        recipes: { include: { bahan: true } },
       },
     });
 
     if (menus.length !== menuIds.length) {
-      return res.status(400).json({
-        message: "Ada menu yang tidak ditemukan atau tidak aktif",
-      });
+      return res
+        .status(400)
+        .json({ message: "Ada menu yang tidak ditemukan atau tidak aktif" });
     }
 
     // =========================================
     // 4. HITUNG TOTAL
     // =========================================
-
     let subtotal = 0;
     let totalItem = 0;
 
@@ -147,17 +156,17 @@ const createPenjualan = async (req, res) => {
       const menu = menus.find((menu) => menu.id === item.menuId);
 
       if (!menu) {
-        return res.status(400).json({
-          message: `Menu ${item.menuId} tidak ditemukan`,
-        });
+        return res
+          .status(400)
+          .json({ message: `Menu ${item.menuId} tidak ditemukan` });
       }
 
       const qty = Number(item.qty);
 
       if (!qty || qty <= 0) {
-        return res.status(400).json({
-          message: `Qty ${menu.nama} tidak valid`,
-        });
+        return res
+          .status(400)
+          .json({ message: `Qty ${menu.nama} tidak valid` });
       }
 
       const itemSubtotal = menu.hargaJual * qty;
@@ -173,7 +182,6 @@ const createPenjualan = async (req, res) => {
         qty,
         subtotal: itemSubtotal,
         catatan: item.note || null,
-
         recipes: {
           create: menu.recipes.map((recipe) => ({
             bahanId: recipe.bahanId,
@@ -189,25 +197,20 @@ const createPenjualan = async (req, res) => {
     // =========================================
     // 5. DISKON
     // =========================================
-
     const discount = Math.max(0, Math.min(Number(discountAmount), subtotal));
-
     const afterDiscount = subtotal - discount;
 
     // =========================================
     // 6. PAJAK
     // =========================================
-
     let taxAmount = 0;
-
     if (isTaxEnabled) {
       taxAmount = Math.round(afterDiscount * (Number(taxPercent) / 100));
     }
 
     // =========================================
-    // 7. GRAND TOTAL
+    // 7. VALIDASI PEMBAYARAN
     // =========================================
-
     let paidAmount = 0;
     let changeAmount = 0;
 
@@ -230,304 +233,194 @@ const createPenjualan = async (req, res) => {
     const paidAt = isPayNow ? new Date() : null;
 
     // =========================================
-    // 8. NOMOR INVOICE
+    // 8. [UBAH] TRANSACTION (invoice digenerate DI DALAM tx)
     // =========================================
-
-    const timeZone = "Asia/Jakarta";
-
-    const now = new Date();
-
-    // Tetap untuk nomor invoice
-    const formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-
-    const dateString = formatter.format(now).replace(/-/g, "");
-
-    // Awal hari WIB
-    const start = toZonedTime(now, timeZone);
-    start.setHours(0, 0, 0, 0);
-    const startOfDay = fromZonedTime(start, timeZone);
-
-    // Akhir hari WIB
-    const end = toZonedTime(now, timeZone);
-    end.setHours(23, 59, 59, 999);
-    const endOfDay = fromZonedTime(end, timeZone);
-
-    const totalToday = await prisma.penjualan.count({
-      where: {
-        createdAt: {
-          gte: startOfDay,
-          lte: endOfDay,
-        },
-        status: {
-          not: "CANCELLED",
-        },
-      },
-    });
-
-    const sequence = String(totalToday + 1).padStart(3, "0");
-
-    const nomorInvoice = `TRX-${dateString}-${sequence}`;
-
-    // =========================================
-    // 9. QUEUE NUMBER
-    // =========================================
-
-    const queueNumber = String(totalToday + 1);
-
-    // =========================================
-    // 10. TRANSACTION
-    // =========================================
-
     const penjualan = await prisma.$transaction(
       async (tx) => {
-        // ==========================================
-        // 1. VALIDASI & KURANGI STOK BAHAN
-        // ==========================================
+        // -----------------------------------------
+        // 8a. [UBAH] GENERATE NOMOR INVOICE DI DALAM TX
+        // Dengan begini count lebih dekat ke titik insert,
+        // dan @unique nomorInvoice jadi jaring pengaman terakhir.
+        // -----------------------------------------
+        const timeZone = "Asia/Jakarta";
+        const now = new Date();
 
-        // Map untuk menggabungkan kebutuhan bahan
-        // jika dalam satu order ada menu yang menggunakan
-        // bahan yang sama.
+        const formatter = new Intl.DateTimeFormat("en-CA", {
+          timeZone,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        });
+        const dateString = formatter.format(now).replace(/-/g, "");
+
+        const start = toZonedTime(now, timeZone);
+        start.setHours(0, 0, 0, 0);
+        const startOfDay = fromZonedTime(start, timeZone);
+
+        const end = toZonedTime(now, timeZone);
+        end.setHours(23, 59, 59, 999);
+        const endOfDay = fromZonedTime(end, timeZone);
+
+        const totalToday = await tx.penjualan.count({
+          where: {
+            createdAt: { gte: startOfDay, lte: endOfDay },
+            status: { not: "CANCELLED" },
+          },
+        });
+
+        const sequence = String(totalToday + 1).padStart(3, "0");
+        const nomorInvoice = `TRX-${dateString}-${sequence}`;
+        const queueNumber = String(totalToday + 1);
+
+        // -----------------------------------------
+        // 8b. VALIDASI & KURANGI STOK BAHAN
+        // -----------------------------------------
         const bahanUsageMap = new Map();
 
         for (const item of details) {
           const menu = menus.find((menu) => menu.id === item.menuId);
-
-          if (!menu) {
-            throw new Error(`Menu ${item.menuId} tidak ditemukan`);
-          }
+          if (!menu) throw new Error(`Menu ${item.menuId} tidak ditemukan`);
 
           const menuQty = Number(item.qty);
 
           for (const recipe of menu.recipes) {
             const bahanId = recipe.bahanId;
-
-            // Kebutuhan bahan untuk menu ini
             const kebutuhanBahan = Number(recipe.qty) * menuQty;
 
-            if (bahanUsageMap.has(bahanId)) {
-              bahanUsageMap.set(
-                bahanId,
-                bahanUsageMap.get(bahanId) + kebutuhanBahan,
-              );
-            } else {
-              bahanUsageMap.set(bahanId, kebutuhanBahan);
-            }
-          }
-        }
-
-        // ==========================================
-        // 2. CEK STOK SEMUA BAHAN
-        // ==========================================
-
-        for (const [bahanId, totalUsage] of bahanUsageMap) {
-          const bahan = await tx.bahan.findUnique({
-            where: {
-              id: bahanId,
-            },
-          });
-
-          if (!bahan) {
-            throw new Error(`Bahan dengan ID ${bahanId} tidak ditemukan`);
-          }
-
-          if (bahan.isDeleted) {
-            throw new Error(`Bahan ${bahan.nama} sudah dihapus`);
-          }
-
-          if (Number(bahan.stok) < totalUsage) {
-            throw new Error(
-              `Stok bahan ${bahan.nama} tidak cukup. ` +
-                `Stok tersedia: ${bahan.stok}, ` +
-                `dibutuhkan: ${totalUsage}`,
+            bahanUsageMap.set(
+              bahanId,
+              (bahanUsageMap.get(bahanId) || 0) + kebutuhanBahan,
             );
           }
         }
 
-        // ==========================================
-        // 3. KURANGI STOK BAHAN
-        // ==========================================
+        // Cek stok semua bahan
+        for (const [bahanId, totalUsage] of bahanUsageMap) {
+          const bahan = await tx.bahan.findUnique({ where: { id: bahanId } });
 
+          if (!bahan)
+            throw new Error(`Bahan dengan ID ${bahanId} tidak ditemukan`);
+          if (bahan.isDeleted)
+            throw new Error(`Bahan ${bahan.nama} sudah dihapus`);
+
+          if (Number(bahan.stok) < totalUsage) {
+            throw new Error(
+              `Stok bahan ${bahan.nama} tidak cukup. ` +
+                `Stok tersedia: ${bahan.stok}, dibutuhkan: ${totalUsage}`,
+            );
+          }
+        }
+
+        // Kurangi stok
         for (const [bahanId, totalUsage] of bahanUsageMap) {
           await tx.bahan.update({
-            where: {
-              id: bahanId,
-            },
-            data: {
-              stok: {
-                decrement: totalUsage,
-              },
-            },
+            where: { id: bahanId },
+            data: { stok: { decrement: totalUsage } },
           });
         }
 
-        // ==========================================
-        // 4. CREATE Session
-        // ==========================================
-
-        const createSession = await tx.cashSession.findFirst({
-          where: {
-            adminId: adminId,
-            closedAt: null,
-            status: "OPEN",
-          },
-          orderBy: {
-            createdAt: "desc",
-          },
+        // -----------------------------------------
+        // 8c. [UBAH] AMBIL SHIFT KAS (sekali saja) + GUARD
+        // -----------------------------------------
+        const cashSession = await tx.cashSession.findFirst({
+          where: { adminId, closedAt: null, status: "OPEN" },
+          orderBy: { createdAt: "desc" },
         });
 
-        // ==========================================
-        // 4. CREATE PENJUALAN
-        // ==========================================
+        // [BARU] Guard: kalau belum buka kas, jangan crash — pesan jelas.
+        if (!cashSession) {
+          throw new Error("Belum ada shift kas yang dibuka. Buka kas dulu.");
+        }
 
-        const penjualan = await tx.penjualan.create({
+        // -----------------------------------------
+        // 8d. CREATE PENJUALAN
+        // -----------------------------------------
+        const created = await tx.penjualan.create({
           data: {
+            clientRefId: clientRefId || null, // [BARU]
             nomorInvoice,
             queueNumber,
-
             adminId,
-
-            cashSessionId: createSession.id,
-
+            cashSessionId: cashSession.id,
             customerName: customerName || null,
-
             orderType,
-
             tableNumber: orderType === "DINE_IN" ? tableNumber : null,
-
             subtotal,
-
             discountAmount: discount,
-
             isTaxEnabled,
-
             taxPercent: isTaxEnabled ? Number(taxPercent) : 0,
-
             taxRate: isTaxEnabled ? Number(taxPercent) / 100 : 0,
-
             taxAmount,
-
             grandTotal,
-
             status: "PREPARING",
-
             paymentStatus,
-
             paidAt,
-
             notes: notes || null,
-
             totalItem,
-
-            details: {
-              create: detailData,
-            },
+            details: { create: detailData },
           },
-
           include: {
-            details: {
-              include: {
-                recipes: true,
-              },
-            },
+            details: { include: { recipes: true } },
           },
         });
 
-        // ==========================================
-        // 5. CREATE PAYMENT
-        // HANYA JIKA BAYAR SEKARANG
-        // ==========================================
-
+        // -----------------------------------------
+        // 8e. CREATE PAYMENT (hanya jika bayar sekarang)
+        // -----------------------------------------
         if (isPayNow) {
           await tx.penjualanPayment.create({
             data: {
-              penjualanId: penjualan.id,
-
+              penjualanId: created.id,
               method: payment.method,
-
               amount: grandTotal,
-
               paidAmount,
-
               changeAmount,
-
               referenceNo: payment.referenceNo || null,
-
               notes: payment.notes || null,
-
               proofImagePath: payment.proofImagePath || null,
-
               proofImageUrl: payment.proofImageUrl || null,
             },
           });
         }
-        const get = await tx.cashSession.findFirst({
-          where: {
-            adminId: adminId,
-            status: "OPEN",
-          },
-          orderBy: {
-            createdAt: "desc",
-          },
-        });
 
-        if (payment.method === "CASH") {
+        // -----------------------------------------
+        // 8f. [UBAH] UPDATE KAS (pakai cashSession yang tadi, tanpa query ulang)
+        // Net efek untuk CASH: kas bertambah sebesar grandTotal
+        // (paidAmount masuk, changeAmount keluar).
+        // -----------------------------------------
+        if (payment?.method === "CASH") {
           await tx.cashSession.update({
-            where: {
-              id: get.id,
-            },
+            where: { id: cashSession.id },
             data: {
-              openingCash: {
-                increment: payment.paidAmount,
-              },
-              totalCashIn: {
-                increment: grandTotal,
-              },
+              openingCash: { increment: paidAmount },
+              totalCashIn: { increment: grandTotal },
             },
           });
-        }
 
-        if (changeAmount > 0 && payment.method === "CASH") {
-          await tx.cashSession.update({
-            where: {
-              id: get.id,
-            },
-            data: {
-              openingCash: {
-                decrement: payment.changeAmount,
+          if (changeAmount > 0) {
+            await tx.cashSession.update({
+              where: { id: cashSession.id },
+              data: {
+                openingCash: { decrement: changeAmount },
               },
-            },
-          });
+            });
+          }
         }
 
-        // ==========================================
-        // 6. RETURN PENJUALAN
-        // ==========================================
-
+        // -----------------------------------------
+        // 8g. RETURN PENJUALAN LENGKAP
+        // -----------------------------------------
         return tx.penjualan.findUnique({
-          where: {
-            id: penjualan.id,
-          },
-
+          where: { id: created.id },
           include: {
-            details: {
-              include: {
-                recipes: true,
-              },
-            },
-
+            details: { include: { recipes: true } },
             payments: true,
           },
         });
       },
-      {
-        timeout: 15000,
-      },
+      { timeout: 15000 },
     );
+
     console.log("PENJUALAN BERHASIL DI BUAT");
 
     return res.status(201).json({
@@ -537,8 +430,54 @@ const createPenjualan = async (req, res) => {
   } catch (error) {
     console.error("CREATE PENJUALAN ERROR:", error);
 
-    return res.status(500).json({
-      message: "Gagal membuat order",
+    // =========================================
+    // [BARU] TANGANI BENTROK UNIQUE (RACE CONDITION)
+    // =========================================
+
+    // Dua request kembar (clientRefId sama) hampir bersamaan:
+    // yang kalah balikin transaksi yang sudah dibuat pemenang.
+    if (
+      error.code === "P2002" &&
+      error.meta?.target?.includes?.("clientRefId") &&
+      req.body?.clientRefId
+    ) {
+      const existing = await prisma.penjualan.findUnique({
+        where: { clientRefId: req.body.clientRefId },
+        include: {
+          details: { include: { recipes: true } },
+          payments: true,
+        },
+      });
+
+      if (existing) {
+        return res.status(200).json({
+          message: "Order sudah ada (idempotent)",
+          data: existing,
+        });
+      }
+    }
+
+    // Bentrok nomor invoice (2 device barengan): minta client retry.
+    // Aman karena clientRefId mencegah dobel saat retry.
+    if (
+      error.code === "P2002" &&
+      error.meta?.target?.includes?.("nomorInvoice")
+    ) {
+      return res.status(409).json({
+        message: "Nomor invoice bentrok, silakan coba lagi",
+        retryable: true,
+      });
+    }
+
+    // Error bisnis yang kita lempar sendiri (stok/kas) -> 400 lebih pas.
+    const businessError =
+      typeof error.message === "string" &&
+      (error.message.includes("Stok") ||
+        error.message.includes("shift kas") ||
+        error.message.includes("tidak ditemukan"));
+
+    return res.status(businessError ? 400 : 500).json({
+      message: businessError ? error.message : "Gagal membuat order",
       error: error.message,
     });
   }

@@ -680,6 +680,8 @@ model Penjualan {
 
   nomorInvoice String @unique
 
+  clientRefId String? @unique
+
   queueNumber String?
 
   adminId String

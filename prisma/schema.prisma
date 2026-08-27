@@ -481,6 +481,9 @@ model PembelianBahan {
   imgBarangUrl      String?
   imgBarangPath     String?
 
+  optional      Json?
+  totalOptional Int?  @default(0)
+
   createdAt         DateTime              @default(now()) @db.Timestamptz(3)
   updatedAt         DateTime              @updatedAt @db.Timestamptz(3)
   isDeleted         Boolean               @default(false)

@@ -6,15 +6,25 @@ const {
   createStockOpname,
   getStockOpname,
   getDetailStockOpname,
+  cekOpnameHariIni,
+  getAllStockOpname,
+  getStockOpnameDetail,
 } = require("../controller/opnameController");
 
 const router = Router();
 
 router.get(
+  "/so-today",
+  authenticate,
+  authorizeRoles("ADMIN", "DAPUR", "MANAGEMENT"),
+  cekOpnameHariIni,
+);
+
+router.get(
   "/getall",
   authenticate,
   authorizeRoles("ADMIN", "DAPUR"),
-  getStockOpname,
+  getAllStockOpname,
 );
 router.get(
   "/",
@@ -24,10 +34,10 @@ router.get(
 );
 
 router.get(
-  "/:id",
+  "/detail/:id",
   authenticate,
   authorizeRoles("ADMIN", "DAPUR"),
-  getDetailStockOpname,
+  getStockOpnameDetail,
 );
 
 router.post(

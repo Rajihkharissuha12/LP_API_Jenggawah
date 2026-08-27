@@ -1,5 +1,35 @@
 const { PrismaClient, Role } = require("@prisma/client");
+const { options } = require("../routes/penjualanRoutes");
 const prisma = new PrismaClient();
+
+async function recalcMenuHpp(tx, menuId) {
+  const recipes = await tx.menuRecipe.findMany({
+    where: { menuId },
+    include: { bahan: true },
+  });
+
+  const totalHpp = recipes.reduce(
+    (sum, r) => sum + Number(r.qty) * Number(r.bahan.hargaPerSatuan),
+    0,
+  );
+
+  const menu = await tx.menu.findUnique({ where: { id: menuId } });
+  if (!menu) return;
+
+  const hargaJual = Number(menu.hargaJual);
+  const marginNominal = hargaJual - totalHpp;
+  const marginPersen =
+    hargaJual > 0 ? Math.round((marginNominal / hargaJual) * 100) : 0;
+
+  await tx.menu.update({
+    where: { id: menuId },
+    data: {
+      hpp: Math.round(totalHpp),
+      marginNominal: Math.round(marginNominal),
+      marginPersen,
+    },
+  });
+}
 
 const createPembelianBahan = async (req, res) => {
   try {
@@ -10,9 +40,9 @@ const createPembelianBahan = async (req, res) => {
       qtyBeli,
       satuanBeli,
       isiPerSatuan,
-      hargaSatuan,
-      hargaTotal,
-      hargaPerunit,
+      hargaSatuan, // harga per unit terkecil (per PCS) -> dipakai HPP
+      hargaPerunit, // harga per satuan pembelian (per DUS)
+      optional, // [BARU] array biaya tambahan
       imgStrukUrl,
       imgStrukPath,
       imgBarangUrl,
@@ -22,7 +52,6 @@ const createPembelianBahan = async (req, res) => {
     // ============================
     // VALIDATION
     // ============================
-
     if (
       !tanggal ||
       !supplier ||
@@ -33,246 +62,125 @@ const createPembelianBahan = async (req, res) => {
       !hargaSatuan ||
       !hargaPerunit
     ) {
-      return res.status(400).json({
-        message: "Data tidak lengkap",
-      });
+      return res.status(400).json({ message: "Data tidak lengkap" });
     }
+
+    // ============================
+    // [BARU] NORMALISASI BIAYA OPTIONAL (server-side, tidak percaya client)
+    // ============================
+    const optionalItems = Array.isArray(optional)
+      ? optional
+          .filter(
+            (it) =>
+              it &&
+              typeof it.nama === "string" &&
+              it.nama.trim() &&
+              Number(it.harga) > 0,
+          )
+          .map((it) => ({ nama: it.nama.trim(), harga: Number(it.harga) }))
+      : [];
+
+    const totalOptional = optionalItems.reduce((t, it) => t + it.harga, 0);
+
+    // [FIX] Total dihitung server: (qty * harga per satuan beli) + biaya tambahan.
+    const hargaTotalBahan = Number(qtyBeli) * Number(hargaPerunit);
+    const hargaTotalFinal = hargaTotalBahan + totalOptional;
 
     // ============================
     // TRANSACTION
     // ============================
-
     const result = await prisma.$transaction(async (tx) => {
-      // =====================================
       // 1. AMBIL BAHAN
-      // =====================================
-
       const dataBahan = await tx.bahan.findFirst({
-        where: {
-          id: bahanId,
-          isDeleted: false,
-        },
+        where: { id: bahanId, isDeleted: false },
       });
+      if (!dataBahan) throw new Error("Bahan tidak ditemukan");
 
-      if (!dataBahan) {
-        throw new Error("Bahan tidak ditemukan");
-      }
-
-      // =====================================
-      // 2. HITUNG STOK BARU
-      // =====================================
-
+      // 2. HITUNG STOK BARU (qty beli * isi per satuan)
       const qtyMasuk = Number(qtyBeli) * Number(isiPerSatuan);
-
       const qtySetelah = Number(dataBahan.stok) + qtyMasuk;
 
-      // =====================================
-      // 3. UPDATE BAHAN
-      // =====================================
-
-      const updateBahan = await tx.bahan.update({
-        where: {
-          id: bahanId,
-        },
-
+      // 3. UPDATE BAHAN (stok + harga per unit terkecil untuk HPP)
+      await tx.bahan.update({
+        where: { id: bahanId },
         data: {
           stok: qtySetelah,
-
-          hargaPerSatuan: Number(hargaSatuan),
+          hargaPerSatuan: Number(hargaSatuan), // per PCS -> dasar HPP
         },
       });
 
-      // =====================================
       // 4. INSERT PEMBELIAN
-      // =====================================
-
+      // PERIKSA: pemetaan hargaSatuan/hargaPerUnit di bawah "menyilang"
+      // dari nama field-nya (warisan kode lama). Aku pertahankan supaya
+      // data lama tidak berubah artinya. Kalau ternyata keliru, tinggal
+      // tukar dua baris bertanda (*).
       const pembelian = await tx.pembelianBahan.create({
         data: {
           tanggal: new Date(tanggal),
-
           supplierId: supplier,
-
           bahanId,
-
           qtyBeli: Number(qtyBeli),
-
           satuanBeli,
-
           isiPerSatuan: Number(isiPerSatuan),
 
-          hargaSatuan: Number(hargaPerunit),
+          hargaSatuan: Number(hargaPerunit), // (*) per satuan beli (DUS)
+          hargaPerUnit: Number(hargaSatuan), // (*) per unit terkecil (PCS)
 
-          hargaTotal: Number(hargaTotal),
-
-          hargaPerUnit: Number(hargaSatuan),
+          hargaTotal: hargaTotalFinal, // [FIX] termasuk biaya tambahan
+          optional: optionalItems, // [BARU] JSON
+          totalOptional, // [BARU]
 
           imgStrukUrl: imgStrukUrl || null,
-
           imgStrukPath: imgStrukPath || null,
-
           imgBarangUrl: imgBarangUrl || null,
-
           imgBarangPath: imgBarangPath || null,
         },
       });
 
-      // =====================================
-      // 5. CREATE STOK MUTASI
-      // =====================================
-
+      // 5. CATAT MUTASI STOK
       await tx.stokMutasi.create({
         data: {
           bahanId,
-
           jenis: "MASUK",
-
           qty: qtyMasuk,
-
           stokSetelah: qtySetelah,
-
           keterangan: "Pembelian bahan baru",
         },
       });
 
-      // =====================================
-      // 6. CARI MENU YANG TERDAMPAK
-      // =====================================
-
+      // 6. CARI MENU TERDAMPAK (yang resepnya pakai bahan ini)
       const affectedRecipes = await tx.menuRecipe.findMany({
-        where: {
-          bahanId: bahanId,
-
-          menu: {
-            isDeleted: false,
-          },
-        },
-
-        select: {
-          menuId: true,
-        },
-
+        where: { bahanId, menu: { isDeleted: false } },
+        select: { menuId: true },
         distinct: ["menuId"],
       });
 
-      // =====================================
-      // 7. AMBIL ID MENU
-      // =====================================
-
-      const menuIds = affectedRecipes.map((recipe) => recipe.menuId);
-
-      // =====================================
-      // 8. UPDATE HPP SEMUA MENU
-      // =====================================
-
+      // 7-8. [CLEAN] RECALC HPP tiap menu terdampak (via helper)
+      const menuIds = affectedRecipes.map((r) => r.menuId);
       for (const menuId of menuIds) {
-        // =================================
-        // 1. AMBIL SEMUA RECIPE MENU
-        // =================================
-
-        const recipes = await tx.menuRecipe.findMany({
-          where: {
-            menuId,
-          },
-          include: {
-            bahan: true,
-          },
-        });
-
-        // =================================
-        // 2. HITUNG TOTAL HPP
-        // =================================
-
-        let totalHpp = 0;
-
-        for (const recipe of recipes) {
-          const qtyRecipe = Number(recipe.qty);
-
-          const hargaBahan = Number(recipe.bahan.hargaPerSatuan);
-
-          const subtotalHpp = qtyRecipe * hargaBahan;
-
-          totalHpp += subtotalHpp;
-        }
-
-        // =================================
-        // 3. AMBIL MENU
-        // =================================
-
-        const menu = await tx.menu.findUnique({
-          where: {
-            id: menuId,
-          },
-        });
-
-        if (!menu) {
-          continue;
-        }
-
-        // =================================
-        // 4. HARGA JUAL
-        // =================================
-
-        const hargaJual = Number(menu.hargaJual);
-
-        // =================================
-        // 5. MARGIN NOMINAL
-        // =================================
-
-        const marginNominal = hargaJual - totalHpp;
-
-        // =================================
-        // 6. MARGIN PERSEN
-        // =================================
-
-        const marginPersen =
-          hargaJual > 0 ? Math.round((marginNominal / hargaJual) * 100) : 0;
-
-        // =================================
-        // 7. UPDATE MENU
-        // =================================
-
-        await tx.menu.update({
-          where: {
-            id: menuId,
-          },
-
-          data: {
-            hpp: Math.round(totalHpp),
-
-            marginNominal: Math.round(marginNominal),
-
-            marginPersen: marginPersen,
-          },
-        });
+        await recalcMenuHpp(tx, menuId);
       }
 
-      return {
-        pembelian,
-
-        affectedMenus: menuIds.length,
-      };
+      return { pembelian, affectedMenus: menuIds.length };
     });
-
-    // =====================================
-    // RESPONSE
-    // =====================================
 
     return res.status(201).json({
       success: true,
-
       message: "Pembelian berhasil dibuat dan HPP menu berhasil diperbarui",
-
       data: result,
     });
   } catch (error) {
     console.error("CREATE PEMBELIAN ERROR:", error);
 
-    return res.status(500).json({
+    // [FIX] error bisnis -> 400
+    const msg = error instanceof Error ? error.message : "Unknown error";
+    const isBusiness =
+      msg.includes("tidak ditemukan") || msg.includes("tidak lengkap");
+
+    return res.status(isBusiness ? 400 : 500).json({
       success: false,
-
-      message: "Gagal membuat pembelian bahan",
-
-      error: error instanceof Error ? error.message : "Unknown error",
+      message: isBusiness ? msg : "Gagal membuat pembelian bahan",
+      error: msg,
     });
   }
 };
@@ -434,6 +342,10 @@ const getDetailPembelianBahan = async (req, res) => {
         hargaTotal: Number(pembelian.hargaTotal),
 
         hargaPerUnit: Number(pembelian.hargaPerUnit),
+
+        optional: pembelian.optional,
+
+        totalOptional: pembelian.totalOptional,
 
         imgBarang: pembelian.imgBarangUrl,
 

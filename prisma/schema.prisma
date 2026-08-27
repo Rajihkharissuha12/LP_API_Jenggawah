@@ -682,6 +682,8 @@ model Penjualan {
 
   clientRefId String? @unique
 
+  lastAdjustmentRefId String?
+
   queueNumber String?
 
   adminId String

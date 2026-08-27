@@ -486,34 +486,27 @@ const createPenjualan = async (req, res) => {
 const updatePenjualanItems = async (req, res) => {
   console.log("UPDATE PENJUALAN ITEMS");
 
+  const SERVICE_FLAT = 5000;
+
   try {
     const { id } = req.params;
-    const { payload } = req.body;
-    const items = payload.items;
-    const payment = payload.payment;
-    const service = payload.service;
-    console.log(payment);
-    console.log(payload.service);
+
+    // [FIX] terima payload baik dibungkus { payload } maupun langsung.
+    const body = req.body?.payload || req.body || {};
+    const items = body.items;
+    const payment = body.payment;
+    const adjustmentRefId = body.adjustmentRefId || null; // [BARU]
 
     // =====================================================
     // 1. VALIDASI REQUEST
     // =====================================================
-
     if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "ID transaksi wajib diisi",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "ID transaksi wajib diisi" });
     }
 
-    if (!Array.isArray(items)) {
-      return res.status(400).json({
-        success: false,
-        message: "Items harus berupa array",
-      });
-    }
-
-    if (items.length === 0) {
+    if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         success: false,
         message: "Minimal ada satu menu dalam transaksi",
@@ -522,184 +515,137 @@ const updatePenjualanItems = async (req, res) => {
 
     if (payment !== null && payment !== undefined) {
       if (typeof payment !== "object" || Array.isArray(payment)) {
-        return res.status(400).json({
-          success: false,
-          message: "Data payment tidak valid",
-        });
+        return res
+          .status(400)
+          .json({ success: false, message: "Data payment tidak valid" });
       }
     }
 
     // =====================================================
     // 2. TRANSACTION DATABASE
     // =====================================================
-
     const result = await prisma.$transaction(
       async (tx) => {
-        // =====================================================
-        // 2.1 AMBIL TRANSAKSI LAMA
-        // =====================================================
-
+        // ---- 2.1 AMBIL TRANSAKSI LAMA ----
         const transaction = await tx.penjualan.findUnique({
-          where: {
-            id,
-          },
-          include: {
-            details: {
-              include: {
-                recipes: true,
-              },
-            },
-          },
+          where: { id },
+          include: { details: { include: { recipes: true } } },
         });
 
         if (!transaction) {
           throw new Error("Transaksi tidak ditemukan");
         }
 
+        // ---- [BARU] IDEMPOTENCY: kalau ref ini sudah diproses, stop ----
+        // Retry dengan adjustmentRefId sama -> kembalikan kondisi terkini,
+        // TIDAK memproses ulang stok/kas/payment.
+        if (
+          adjustmentRefId &&
+          transaction.lastAdjustmentRefId === adjustmentRefId
+        ) {
+          console.log("IDEMPOTENT HIT (adjust):", adjustmentRefId);
+          return tx.penjualan.findUnique({
+            where: { id },
+            include: {
+              details: { include: { recipes: true } },
+              payments: true,
+            },
+          });
+        }
+
+        // ---- [BARU] GUARD STATUS ----
+        if (transaction.status === "CANCELLED") {
+          throw new Error("Transaksi sudah dibatalkan, tidak bisa diedit");
+        }
+
         // =====================================================
         // 3. VALIDASI MENU BARU
         // =====================================================
-
         const menuIds = [...new Set(items.map((item) => item.menuId))];
 
         const menus = await tx.menu.findMany({
-          where: {
-            id: {
-              in: menuIds,
-            },
-            isDeleted: false,
-            isActive: true,
-          },
-          include: {
-            recipes: {
-              include: {
-                bahan: true,
-              },
-            },
-          },
+          where: { id: { in: menuIds }, isDeleted: false, isActive: true },
+          include: { recipes: { include: { bahan: true } } },
         });
 
         if (menus.length !== menuIds.length) {
           throw new Error("Ada menu yang tidak ditemukan atau tidak aktif");
         }
 
-        // =====================================================
-        // 4. BUAT MAP MENU
-        // =====================================================
-
         const menuMap = new Map(menus.map((menu) => [menu.id, menu]));
 
         // =====================================================
-        // 5. HITUNG STOK LAMA
-        //
-        // Stok lama sebelumnya sudah dikurangi ketika
-        // transaksi dibuat.
+        // 5. HITUNG STOK LAMA (pemakaian bahan transaksi lama)
+        // Catatan: pakai resep dari detail LAMA (transaction.details),
+        // supaya kalau resep menu berubah setelahnya, pengembalian stok
+        // tetap sesuai yang dulu dipotong.
         // =====================================================
-
         const oldBahanUsage = new Map();
 
         for (const detail of transaction.details) {
-          const menu = menuMap.get(detail.menuId);
-
-          if (!menu) {
-            throw new Error(`Menu ${detail.menuId} tidak ditemukan`);
-          }
-
-          const qty = Number(detail.qty);
-
-          for (const recipe of menu.recipes) {
-            const usage = Number(recipe.qty) * qty;
-
-            const current = oldBahanUsage.get(recipe.bahanId) || 0;
-
-            oldBahanUsage.set(recipe.bahanId, current + usage);
+          for (const recipe of detail.recipes) {
+            const usage = Number(recipe.qty) * Number(detail.qty);
+            oldBahanUsage.set(
+              recipe.bahanId,
+              (oldBahanUsage.get(recipe.bahanId) || 0) + usage,
+            );
           }
         }
 
         // =====================================================
         // 6. HITUNG STOK BARU
         // =====================================================
-
         const newBahanUsage = new Map();
 
         for (const item of items) {
           const menu = menuMap.get(item.menuId);
-
-          if (!menu) {
-            throw new Error(`Menu ${item.menuId} tidak ditemukan`);
-          }
+          if (!menu) throw new Error(`Menu ${item.menuId} tidak ditemukan`);
 
           const qty = Number(item.qty);
-
           if (!Number.isInteger(qty) || qty <= 0) {
             throw new Error(`Qty menu ${menu.nama} tidak valid`);
           }
 
           for (const recipe of menu.recipes) {
             const usage = Number(recipe.qty) * qty;
-
-            const current = newBahanUsage.get(recipe.bahanId) || 0;
-
-            newBahanUsage.set(recipe.bahanId, current + usage);
+            newBahanUsage.set(
+              recipe.bahanId,
+              (newBahanUsage.get(recipe.bahanId) || 0) + usage,
+            );
           }
         }
 
         // =====================================================
-        // 7. HITUNG SELISIH STOK
-        //
-        // positive = stok harus dikurangi
-        // negative = stok harus dikembalikan
+        // 7. SELISIH STOK (+ = potong lagi, - = kembalikan)
         // =====================================================
-
         const bahanIds = new Set([
           ...oldBahanUsage.keys(),
           ...newBahanUsage.keys(),
         ]);
 
         const stockChanges = new Map();
-
         for (const bahanId of bahanIds) {
-          const oldUsage = oldBahanUsage.get(bahanId) || 0;
-
-          const newUsage = newBahanUsage.get(bahanId) || 0;
-
-          const difference = newUsage - oldUsage;
-
-          if (difference !== 0) {
-            stockChanges.set(bahanId, difference);
-          }
+          const diff =
+            (newBahanUsage.get(bahanId) || 0) -
+            (oldBahanUsage.get(bahanId) || 0);
+          if (diff !== 0) stockChanges.set(bahanId, diff);
         }
 
         // =====================================================
-        // 8. VALIDASI STOK
+        // 8. VALIDASI STOK (hanya yang butuh tambahan)
         // =====================================================
+        for (const [bahanId, diff] of stockChanges) {
+          if (diff <= 0) continue;
 
-        for (const [bahanId, difference] of stockChanges) {
-          // Kalau stok tidak bertambah kebutuhannya,
-          // tidak perlu validasi stok tersedia.
-          if (difference <= 0) {
-            continue;
-          }
-
-          const bahan = await tx.bahan.findUnique({
-            where: {
-              id: bahanId,
-            },
-          });
-
-          if (!bahan) {
-            throw new Error(`Bahan ${bahanId} tidak ditemukan`);
-          }
-
-          if (bahan.isDeleted) {
+          const bahan = await tx.bahan.findUnique({ where: { id: bahanId } });
+          if (!bahan) throw new Error(`Bahan ${bahanId} tidak ditemukan`);
+          if (bahan.isDeleted)
             throw new Error(`Bahan ${bahan.nama} sudah dihapus`);
-          }
 
-          if (Number(bahan.stok) < difference) {
+          if (Number(bahan.stok) < diff) {
             throw new Error(
               `Stok bahan ${bahan.nama} tidak cukup. ` +
-                `Stok tersedia: ${bahan.stok}, ` +
-                `tambahan dibutuhkan: ${difference}`,
+                `Stok tersedia: ${bahan.stok}, tambahan dibutuhkan: ${diff}`,
             );
           }
         }
@@ -707,60 +653,31 @@ const updatePenjualanItems = async (req, res) => {
         // =====================================================
         // 9. UPDATE STOK
         // =====================================================
-
-        for (const [bahanId, difference] of stockChanges) {
+        for (const [bahanId, diff] of stockChanges) {
           await tx.bahan.update({
-            where: {
-              id: bahanId,
-            },
-            data: {
-              stok:
-                difference > 0
-                  ? {
-                      decrement: difference,
-                    }
-                  : {
-                      increment: Math.abs(difference),
-                    },
-            },
+            where: { id: bahanId },
+            data:
+              diff > 0
+                ? { stok: { decrement: diff } }
+                : { stok: { increment: Math.abs(diff) } },
           });
         }
 
         // =====================================================
-        // 10. HAPUS DETAIL LAMA
-        //
-        // recipes detail lama ikut terhapus karena
-        // relasi cascade.
+        // 10. HAPUS DETAIL LAMA (recipes ikut via cascade)
         // =====================================================
-
-        await tx.penjualanDetail.deleteMany({
-          where: {
-            penjualanId: id,
-          },
-        });
+        await tx.penjualanDetail.deleteMany({ where: { penjualanId: id } });
 
         // =====================================================
-        // 11. BUAT DETAIL BARU
+        // 11. BUAT DETAIL BARU + subtotal
         // =====================================================
-
         const detailData = [];
-
         let subtotal = 0;
         let totalItem = 0;
 
         for (const item of items) {
           const menu = menuMap.get(item.menuId);
-
-          if (!menu) {
-            throw new Error(`Menu ${item.menuId} tidak ditemukan`);
-          }
-
           const qty = Number(item.qty);
-
-          if (!Number.isInteger(qty) || qty <= 0) {
-            throw new Error(`Qty menu ${menu.nama} tidak valid`);
-          }
-
           const itemSubtotal = Number(menu.hargaJual) * qty;
 
           subtotal += itemSubtotal;
@@ -774,7 +691,6 @@ const updatePenjualanItems = async (req, res) => {
             qty,
             subtotal: itemSubtotal,
             catatan: item.catatan || null,
-
             recipes: {
               create: menu.recipes.map((recipe) => ({
                 bahanId: recipe.bahanId,
@@ -789,79 +705,59 @@ const updatePenjualanItems = async (req, res) => {
         }
 
         // =====================================================
-        // 12. HITUNG DISKON
+        // 12-14. HITUNG DISKON, PAJAK, GRAND TOTAL
+        // (rumus SAMA dengan mobile computeAdjustment)
         // =====================================================
-
         const discount = Math.max(
           0,
           Math.min(Number(transaction.discountAmount || 0), subtotal),
         );
-
         const afterDiscount = subtotal - discount;
 
-        // =====================================================
-        // 13. HITUNG PAJAK
-        // =====================================================
-
         let taxAmount = 0;
-
         if (transaction.isTaxEnabled) {
           taxAmount = Math.round(
             afterDiscount * (Number(transaction.taxPercent || 0) / 100),
           );
         }
 
-        // =====================================================
-        // 14. HITUNG GRAND TOTAL
-        // =====================================================
+        // [FIX] service flat dari server, tidak percaya client.
+        const service = SERVICE_FLAT;
 
-        const grandTotal =
-          Number(afterDiscount) + Number(taxAmount) + Number(service);
-        console.log(afterDiscount);
-        console.log(taxAmount);
-        console.log(service);
+        const grandTotal = afterDiscount + taxAmount + service;
 
-        // Selisih dengan grand total sebelumnya
+        // [FIX] selisih dihitung server (sumber kebenaran).
         const difference = grandTotal - Number(transaction.grandTotal);
 
         // =====================================================
         // 15. HANDLE PAYMENT
         // =====================================================
 
-        // -----------------------------------------------------
-        // PAYMENT TAMBAHAN
-        // -----------------------------------------------------
-
+        // ---------- PAY_MORE (customer bayar tambahan) ----------
         if (difference > 0) {
-          if (!payment) {
+          if (!payment || !payment.method) {
             throw new Error("Data pembayaran tambahan wajib diisi");
           }
 
-          if (!payment.method) {
-            throw new Error("Metode pembayaran wajib dipilih");
-          }
-
           const paidAmount = Number(payment.paidAmount || 0);
-
-          if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
-            throw new Error("Nominal pembayaran tidak valid");
-          }
-
-          // Customer minimal harus membayar sebesar
-          // selisih transaksi.
-          if (paidAmount < difference) {
+          if (!Number.isFinite(paidAmount) || paidAmount < difference) {
             throw new Error(
               `Nominal pembayaran tidak cukup. ` +
                 `Minimal Rp${difference.toLocaleString("id-ID")}`,
             );
           }
 
+          // [FIX] kembalian dihitung server.
           const changeAmount = Math.max(0, paidAmount - difference);
 
-          // =====================================================
-          // UPDATE CASH SESSION
-          // =====================================================
+          // Non-cash wajib bukti.
+          if (payment.method !== "CASH") {
+            if (!payment.proofImagePath && !payment.proofImageUrl) {
+              throw new Error("Bukti transaksi wajib diupload");
+            }
+          }
 
+          // Update kas HANYA untuk CASH.
           if (payment.method === "CASH") {
             const cashSession = await tx.cashSession.findFirst({
               where: {
@@ -869,83 +765,48 @@ const updatePenjualanItems = async (req, res) => {
                 status: "OPEN",
                 isdeleted: false,
               },
-              orderBy: {
-                openedAt: "desc",
-              },
+              orderBy: { openedAt: "desc" },
             });
-
             if (!cashSession) {
               throw new Error("Cash session yang aktif tidak ditemukan");
             }
 
-            console.log("UANG DI KASIH ", paidAmount);
-            console.log("YANG HARUS DI BAYAR ", payment.amount);
-            console.log("UANG YANG DI KEMBALIKAN ", payment.changeAmount);
+            // [FIX] Net kas bertambah = difference:
+            //   uang masuk (paidAmount) - kembalian (changeAmount).
             await tx.cashSession.update({
-              where: {
-                id: cashSession.id,
-              },
+              where: { id: cashSession.id },
               data: {
-                openingCash: {
-                  increment: paidAmount,
-                },
-                totalCashIn: {
-                  increment: payment.amount,
-                },
+                openingCash: { increment: paidAmount },
+                totalCashIn: { increment: difference }, // pakai difference server
               },
             });
-          }
 
-          // ---------------------------------------------------
-          // NON CASH WAJIB ADA BUKTI
-          // ---------------------------------------------------
-
-          if (payment.method !== "CASH") {
-            if (!payment.proofImagePath && !payment.proofImageUrl) {
-              throw new Error("Bukti transaksi wajib diupload");
+            if (changeAmount > 0) {
+              await tx.cashSession.update({
+                where: { id: cashSession.id },
+                data: { openingCash: { decrement: changeAmount } },
+              });
             }
           }
 
           await tx.penjualanPayment.create({
             data: {
               penjualanId: transaction.id,
-
               method: payment.method,
-
-              // Nominal yang benar-benar menjadi
-              // tambahan transaksi.
-              amount: difference,
-
-              // Nominal uang yang dibayarkan customer.
+              amount: difference, // tambahan resmi
               paidAmount,
-
-              // Kembalian.
-              changeAmount,
-
+              changeAmount, // server
               proofImagePath: payment.proofImagePath || null,
-
               proofImageUrl: payment.proofImageUrl || null,
-
               referenceNo: payment.referenceNo || null,
-
               notes: payment.notes || "Adjust Menu Tambah",
             },
           });
         }
 
-        // -----------------------------------------------------
-        // TIDAK ADA SELISIH
-        // -----------------------------------------------------
-
-        // difference === 0
-        // Tidak perlu membuat payment baru.
-
-        // -----------------------------------------------------
-        // REFUND
-        // -----------------------------------------------------
-
+        // ---------- REFUND (uang dikembalikan ke customer) ----------
         if (difference < 0) {
-          const refundAmount = Math.abs(difference);
+          const refundAmount = Math.abs(difference); // [FIX] server
 
           const cashSession = await tx.cashSession.findFirst({
             where: {
@@ -953,100 +814,66 @@ const updatePenjualanItems = async (req, res) => {
               status: "OPEN",
               isdeleted: false,
             },
-            orderBy: {
-              openedAt: "desc",
-            },
+            orderBy: { openedAt: "desc" },
           });
-
           if (!cashSession) {
             throw new Error("Cash session yang aktif tidak ditemukan");
           }
 
+          // [FIX] kurangi kas pakai refundAmount server, bukan angka client.
+          if (Number(cashSession.openingCash) < refundAmount) {
+            throw new Error("Saldo kas tidak cukup untuk pengembalian");
+          }
+
           await tx.cashSession.update({
-            where: {
-              id: cashSession.id,
-            },
-            data: {
-              openingCash: {
-                decrement: payment.changeAmount,
-              },
-            },
+            where: { id: cashSession.id },
+            data: { openingCash: { decrement: refundAmount } },
           });
 
           await tx.penjualanPayment.create({
             data: {
               penjualanId: transaction.id,
-
-              // Refund sementara menggunakan CASH.
-              method: "CASH",
-
-              // Tidak ada pembayaran masuk.
+              method: "CASH", // refund sementara cash
               amount: 0,
-
               paidAmount: 0,
-
-              // Nilai uang yang harus dikembalikan.
               changeAmount: refundAmount,
-
-              // Untuk refund sementara tidak ada
-              // bukti pembayaran masuk.
               proofImagePath: null,
               proofImageUrl: null,
               referenceNo: null,
-
               notes: payment?.notes || "Adjust Pengembalian",
             },
           });
         }
 
-        // =====================================================
-        // 16. UPDATE PENJUALAN
-        // =====================================================
+        // difference === 0 -> tidak ada payment, tapi stok/detail tetap
+        // diperbarui (mis. ganti menu dengan harga sama).
 
-        console.log("GRANT total ", grandTotal);
+        // =====================================================
+        // 16. UPDATE PENJUALAN (+ tandai adjustmentRefId)
+        // =====================================================
         const updatedTransaction = await tx.penjualan.update({
-          where: {
-            id,
-          },
-
+          where: { id },
           data: {
             subtotal,
             discountAmount: discount,
             taxAmount,
             grandTotal,
-
             totalItem,
-
-            details: {
-              create: detailData,
-            },
+            lastAdjustmentRefId: adjustmentRefId, // [BARU] tanda idempotency
+            details: { create: detailData },
           },
-
           include: {
-            details: {
-              include: {
-                recipes: true,
-              },
-            },
-
+            details: { include: { recipes: true } },
             payments: true,
           },
         });
 
         return updatedTransaction;
       },
-      {
-        timeout: 15000,
-      },
+      { timeout: 15000 },
     );
 
-    // =====================================================
-    // 17. RESPONSE
-    // =====================================================
-
     console.log("UPDATE PENJUALAN BERHASIL");
-
-    console.log(result);
 
     return res.status(200).json({
       success: true,
@@ -1056,9 +883,19 @@ const updatePenjualanItems = async (req, res) => {
   } catch (error) {
     console.error("UPDATE PENJUALAN ERROR:", error);
 
-    return res.status(500).json({
+    // [FIX] error bisnis -> 400, sisanya 500.
+    const msg = typeof error?.message === "string" ? error.message : "";
+    const isBusiness =
+      msg.includes("tidak ditemukan") ||
+      msg.includes("tidak cukup") ||
+      msg.includes("wajib") ||
+      msg.includes("tidak valid") ||
+      msg.includes("dibatalkan") ||
+      msg.includes("Cash session");
+
+    return res.status(isBusiness ? 400 : 500).json({
       success: false,
-      message: error?.message || "Gagal memperbarui pesanan",
+      message: msg || "Gagal memperbarui pesanan",
     });
   }
 };

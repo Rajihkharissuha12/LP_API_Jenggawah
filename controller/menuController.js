@@ -622,6 +622,7 @@ const getAllMenu = async (req, res) => {
       search = "",
       category = "",
       status = "",
+      kasir = true,
     } = req.query;
 
     const currentPage = Number(page);
@@ -729,15 +730,19 @@ const getAllMenu = async (req, res) => {
       };
     });
 
-    const shift = await prisma.cashSession.findFirst({
-      where: {
-        adminId: adminId,
-        status: "OPEN",
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+    let sisaCash;
+    if (kasir) {
+      const shift = await prisma.cashSession.findFirst({
+        where: {
+          adminId: adminId,
+          status: "OPEN",
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+      sisaCash = shift.openingCash;
+    }
 
     return res.status(200).json({
       success: true,
@@ -745,7 +750,7 @@ const getAllMenu = async (req, res) => {
       message: "Berhasil mengambil data menu",
 
       data: menuWithWarning,
-      sisaCash: shift.openingCash,
+      sisaCash: sisaCash,
 
       pagination: {
         page: currentPage,

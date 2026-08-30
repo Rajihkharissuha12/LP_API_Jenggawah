@@ -14,6 +14,7 @@ const {
   deleteMenu,
   getDetailMenu,
   getListHpp,
+  landingMenu,
 } = require("../controller/menuController");
 
 const router = Router();
@@ -21,9 +22,11 @@ const router = Router();
 router.get(
   "/getall",
   authenticate,
-  authorizeRoles("ADMIN", "MANAGEMENT"),
+  authorizeRoles("ADMIN", "MANAGEMENT", "DAPUR"),
   getAllMenuCategory,
 );
+
+router.get("/landing", landingMenu);
 
 router.get(
   "/menu-all",

@@ -140,6 +140,16 @@ enum StatusCashSession {
   CLOSE
 }
 
+enum StatusAbsensi {
+  VALID
+  DILUAR_RADIUS
+}
+
+enum TipeAbsensi {
+  MASUK
+  PULANG
+}
+
 // ===== Core Actors =====
 model Admin {
   id        String        @id @default(uuid())
@@ -155,6 +165,7 @@ model Admin {
   contactLogs  ContactLog[]
   adminRoles   AdminRole[]
   penjualans Penjualan[]
+  absens Absensi[]
 }
 
 model Role{
@@ -836,4 +847,39 @@ model Config {
   id                  String              @id @default(uuid())
   name                 String             
   value               Boolean
+}
+
+model WorkLocation {
+  id        Int       @id @default(autoincrement())
+  nama      String
+  latitude  Float
+  longitude Float
+  radius    Int       @default(100) // meter, batas absen valid
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  absensi   Absensi[]
+}
+
+model Absensi {
+  id             Int           @id @default(autoincrement())
+  adminId        String
+  admin          Admin         @relation(fields: [adminId], references: [id])
+  workLocationId Int?
+  workLocation   WorkLocation? @relation(fields: [workLocationId], references: [id])
+
+  tipe     TipeAbsensi
+  tanggal  DateTime      @db.Date   // server WIB, guard harian
+  waktu    DateTime      @default(now())
+
+  latitude  Float        // audit — jangan dipercaya penuh
+  longitude Float
+  jarak     Int          // Haversine, DIHITUNG SERVER
+  status    StatusAbsensi
+
+  fotoUrl  String
+  fotoPath String
+
+  createdAt DateTime     @default(now())
+
+  @@unique([adminId, tipe, tanggal]) // 1 masuk + 1 pulang / hari
 }

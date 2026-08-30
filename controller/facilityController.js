@@ -145,7 +145,7 @@ const createFacility = async (req, res) => {
         : undefined;
 
     const imageFiles =
-      filesObj && !Array.isArray(filesObj) ? filesObj.images ?? [] : [];
+      filesObj && !Array.isArray(filesObj) ? (filesObj.images ?? []) : [];
 
     let heroImageObj = null;
     const imagesArray = [];
@@ -153,7 +153,7 @@ const createFacility = async (req, res) => {
     if (heroFile) {
       const up = await uploadBufferToCloudinary(
         heroFile.buffer,
-        "facilities/hero"
+        "facilities/hero",
       );
       // Struktur yang disimpan di kolom Json: { image_url, public_id, ... }
       heroImageObj = up;
@@ -567,14 +567,14 @@ const updateFacility = async (req, res) => {
       const arr = Array.isArray(removeImages)
         ? removeImages
         : typeof removeImages === "string"
-        ? removeImages.startsWith("[")
-          ? JSON.parse(removeImages)
-          : removeImages.split(",")
-        : [];
+          ? removeImages.startsWith("[")
+            ? JSON.parse(removeImages)
+            : removeImages.split(",")
+          : [];
       removeList = arr.map((s) => String(s).trim()).filter(Boolean);
       if (removeList.length) {
         dataUpdate.images = currentGallery.filter(
-          (img) => !removeList.includes(img?.public_id)
+          (img) => !removeList.includes(img?.public_id),
         );
       }
     }
@@ -590,7 +590,7 @@ const updateFacility = async (req, res) => {
     if (newHeroFile) {
       const up = await uploadBufferToCloudinary(
         newHeroFile.buffer,
-        "facilities/hero"
+        "facilities/hero",
       );
       dataUpdate.heroImage = up;
       uploadedNewHero = up;
@@ -957,7 +957,7 @@ const deleteFacility = async (req, res) => {
     }
 
     console.info(
-      `[AUDIT] Admin ${adminId} menghapus fasilitas ${existing.name} (${existing.id})`
+      `[AUDIT] Admin ${adminId} menghapus fasilitas ${existing.name} (${existing.id})`,
     );
     return res.status(200).json({
       message: "Fasilitas berhasil dihapus",
@@ -1087,6 +1087,7 @@ const getFacilitiesForLanding = async (req, res) => {
 
     const data = items.map(toCardPayload); // card ringkas; rules tidak dibawa di sini agar ringan
 
+    console.log(data);
     return res.status(200).json({
       success: true,
       count: data.length,
@@ -1312,7 +1313,7 @@ const deleteFacilityHeroImage = async (req, res) => {
     } catch (cloudErr) {
       console.warn(
         `Cloudinary delete failed for ${publicId}:`,
-        cloudErr?.message || cloudErr
+        cloudErr?.message || cloudErr,
       );
       // Log warning tetapi tidak gagalkan response
       try {
@@ -1338,7 +1339,7 @@ const deleteFacilityHeroImage = async (req, res) => {
     }
 
     console.info(
-      `[AUDIT] Admin ${adminId} menghapus hero image fasilitas ${facility.name} (${facilityId})`
+      `[AUDIT] Admin ${adminId} menghapus hero image fasilitas ${facility.name} (${facilityId})`,
     );
 
     return res.status(200).json({
@@ -1425,7 +1426,7 @@ const deleteFacilityGalleryImage = async (req, res) => {
 
     // Cari gambar berdasarkan publicId
     const imageToDelete = facility.images.find(
-      (img) => img.public_id === publicId
+      (img) => img.public_id === publicId,
     );
     if (!imageToDelete) {
       return res
@@ -1435,7 +1436,7 @@ const deleteFacilityGalleryImage = async (req, res) => {
 
     // Filter images untuk menghapus yang sesuai publicId
     const updatedImages = facility.images.filter(
-      (img) => img.public_id !== publicId
+      (img) => img.public_id !== publicId,
     );
 
     const beforeSnapshot = {
@@ -1480,7 +1481,7 @@ const deleteFacilityGalleryImage = async (req, res) => {
     } catch (cloudErr) {
       console.warn(
         `Cloudinary delete failed for ${publicId}:`,
-        cloudErr?.message || cloudErr
+        cloudErr?.message || cloudErr,
       );
       try {
         await prisma.auditLog.create({
@@ -1505,7 +1506,7 @@ const deleteFacilityGalleryImage = async (req, res) => {
     }
 
     console.info(
-      `[AUDIT] Admin ${adminId} menghapus gallery image fasilitas ${facility.name} (${facilityId})`
+      `[AUDIT] Admin ${adminId} menghapus gallery image fasilitas ${facility.name} (${facilityId})`,
     );
 
     return res.status(200).json({

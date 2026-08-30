@@ -472,6 +472,145 @@ const createMenu = async (req, res) => {
   }
 };
 
+const landingMenu = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 9,
+      search = "",
+      category = "",
+      status = "",
+    } = req.query;
+
+    const currentPage = Number(page);
+    const take = Number(limit);
+    const skip = (currentPage - 1) * take;
+
+    const where = {
+      isDeleted: false,
+
+      ...(search && {
+        nama: {
+          contains: search,
+          mode: "insensitive",
+        },
+      }),
+
+      ...(category && {
+        categoryId: category,
+      }),
+
+      ...(status !== "" && {
+        isActive: status === "true",
+      }),
+    };
+
+    const [menu, total] = await prisma.$transaction([
+      prisma.menu.findMany({
+        where,
+
+        include: {
+          category: {
+            select: {
+              id: true,
+              nama: true,
+            },
+          },
+
+          recipes: {
+            select: {
+              id: true,
+              qty: true,
+
+              bahan: {
+                select: {
+                  id: true,
+                  nama: true,
+                  stok: true,
+                  minimum_stok: true,
+                  satuan: true,
+                  isDeleted: true,
+                },
+              },
+            },
+          },
+        },
+
+        orderBy: {
+          createdAt: "desc",
+        },
+
+        skip,
+        take,
+      }),
+
+      prisma.menu.count({
+        where,
+      }),
+    ]);
+
+    // ==========================================
+    // TAMBAHKAN WARNING STOK
+    // ==========================================
+
+    const menuWithWarning = menu.map((item) => {
+      const warning = item.recipes
+        .filter((recipe) => {
+          const bahan = recipe.bahan;
+
+          // Bahan sudah dihapus
+          if (bahan.isDeleted) {
+            return false;
+          }
+
+          // Stok <= minimum stok
+          return bahan.stok <= bahan.minimum_stok;
+        })
+        .map((recipe) => {
+          const bahan = recipe.bahan;
+
+          return {
+            bahanId: bahan.id,
+            nama: bahan.nama,
+            stok: bahan.stok,
+            minimumStok: bahan.minimum_stok,
+            satuan: bahan.satuan,
+
+            status: bahan.stok <= 0 ? "OUT_OF_STOCK" : "LOW_STOCK",
+          };
+        });
+
+      return {
+        ...item,
+
+        warning,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+
+      message: "Berhasil mengambil data menu",
+
+      data: menuWithWarning,
+
+      pagination: {
+        page: currentPage,
+        limit: take,
+        total,
+        totalPages: Math.ceil(total / take),
+      },
+    });
+  } catch (error) {
+    console.log(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Terjadi kesalahan server",
+    });
+  }
+};
+
 const getAllMenu = async (req, res) => {
   console.log("SEMUA MENU");
   const adminId = req.user.id;
@@ -1206,4 +1345,5 @@ module.exports = {
   deleteMenu,
   getDetailMenu,
   getListHpp,
+  landingMenu,
 };

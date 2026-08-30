@@ -412,6 +412,7 @@ const getDataOpnameNow = async (req, res) => {
         },
       },
     });
+    console.log("STOK OPNAME ", opname);
 
     if (opname) {
       return res.json({

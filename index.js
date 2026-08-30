@@ -15,6 +15,7 @@ const menuRoutes = require("./routes/menuRoutes");
 const penjualanRoutes = require("./routes/penjualanRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const cashSessionRoutes = require("./routes/cashSessionRoutes");
+const absenRoutes = require("./routes/absenRoutes");
 
 const app = express();
 
@@ -73,6 +74,7 @@ app.use("/penjualan", penjualanRoutes);
 app.use("/menu", menuRoutes);
 app.use("/dashboard", dashboardRoutes);
 app.use("/cashsession", cashSessionRoutes);
+app.use("/absen", absenRoutes);
 
 // Route test
 app.get("/", (req, res) => {

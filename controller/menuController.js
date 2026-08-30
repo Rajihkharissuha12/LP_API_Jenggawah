@@ -622,7 +622,7 @@ const getAllMenu = async (req, res) => {
       search = "",
       category = "",
       status = "",
-      kasir = true,
+      kasir = "",
     } = req.query;
 
     const currentPage = Number(page);
@@ -731,7 +731,7 @@ const getAllMenu = async (req, res) => {
     });
 
     let sisaCash;
-    if (kasir) {
+    if (kasir !== "false") {
       const shift = await prisma.cashSession.findFirst({
         where: {
           adminId: adminId,
